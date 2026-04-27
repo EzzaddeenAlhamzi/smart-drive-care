@@ -15,6 +15,8 @@ class SettingsProvider extends ChangeNotifier {
   int _dataRetentionDays = 30;
   /// عنوان السيرفر الوسيط (بدون /update). مثال: http://10.0.2.2:3000
   String _sensorServerBaseUrl = '';
+  String _deviceId = '';
+  bool _lastRemoteSyncOk = true;
 
   String get temperatureUnit => _temperatureUnit;
   int get updateIntervalSeconds => _updateIntervalSeconds;
@@ -24,6 +26,8 @@ class SettingsProvider extends ChangeNotifier {
   bool get darkMode => _darkMode;
   int get dataRetentionDays => _dataRetentionDays;
   String get sensorServerBaseUrl => _sensorServerBaseUrl;
+  String get deviceId => _deviceId;
+  bool get lastRemoteSyncOk => _lastRemoteSyncOk;
 
   /// إذا كان غير فارغ، لوحة التحكم تقرأ المستشعرات من السيرفر.
   bool get useLiveSensors => _sensorServerBaseUrl.trim().isNotEmpty;
@@ -41,6 +45,7 @@ class SettingsProvider extends ChangeNotifier {
         'darkMode': _darkMode,
         'dataRetentionDays': _dataRetentionDays,
         'sensorServerBaseUrl': _sensorServerBaseUrl,
+        'deviceId': _deviceId,
       };
 
   void _applyMap(Map<String, dynamic> map) {
@@ -52,6 +57,12 @@ class SettingsProvider extends ChangeNotifier {
     _darkMode = map['darkMode'] as bool? ?? _darkMode;
     _dataRetentionDays = map['dataRetentionDays'] as int? ?? _dataRetentionDays;
     _sensorServerBaseUrl = map['sensorServerBaseUrl'] as String? ?? _sensorServerBaseUrl;
+    _deviceId = map['deviceId'] as String? ?? _deviceId;
+  }
+
+  String _generateDeviceId() {
+    final t = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+    return 'device-$t';
   }
 
   Future<void> _load() async {
@@ -63,10 +74,17 @@ class SettingsProvider extends ChangeNotifier {
         _applyMap(map);
       } catch (_) {}
     }
+    if (_deviceId.trim().isEmpty) {
+      _deviceId = _generateDeviceId();
+      await prefs.setString(_storageKey, jsonEncode(_toMap()));
+    }
 
     // Sync from Firestore when server is configured.
     if (_sensorServerBaseUrl.trim().isNotEmpty) {
-      final remote = await SettingsApiService.fetchSettings(_sensorServerBaseUrl);
+      final remote = await SettingsApiService.fetchSettings(
+        _sensorServerBaseUrl,
+        deviceId: _deviceId,
+      );
       if (remote != null) {
         _applyMap(remote);
         await prefs.setString(_storageKey, jsonEncode(_toMap()));
@@ -80,7 +98,13 @@ class SettingsProvider extends ChangeNotifier {
     final map = _toMap();
     await prefs.setString(_storageKey, jsonEncode(map));
     if (syncRemote && _sensorServerBaseUrl.trim().isNotEmpty) {
-      await SettingsApiService.saveSettings(_sensorServerBaseUrl, map);
+      _lastRemoteSyncOk = await SettingsApiService.saveSettings(
+        _sensorServerBaseUrl,
+        map,
+        deviceId: _deviceId,
+      );
+    } else {
+      _lastRemoteSyncOk = true;
     }
     notifyListeners();
   }

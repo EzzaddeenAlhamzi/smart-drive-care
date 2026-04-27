@@ -6,6 +6,8 @@ import '../services/alerts_api_service.dart';
 class AlertsProvider extends ChangeNotifier {
   List<Alert> _alerts = [];
   String _baseUrl = '';
+  String _deviceId = '';
+  bool _criticalOnly = false;
   Timer? _pollTimer;
   bool _isLoading = false;
 
@@ -25,10 +27,17 @@ class AlertsProvider extends ChangeNotifier {
 
   AlertsProvider();
 
-  void configureServer(String baseUrl) {
+  void configureServer(
+    String baseUrl, {
+    bool criticalOnly = false,
+    String deviceId = '',
+  }) {
     final normalized = baseUrl.trim();
-    if (normalized == _baseUrl) return;
+    final id = deviceId.trim();
+    if (normalized == _baseUrl && criticalOnly == _criticalOnly && id == _deviceId) return;
     _baseUrl = normalized;
+    _criticalOnly = criticalOnly;
+    _deviceId = id;
     _pollTimer?.cancel();
     if (_baseUrl.isNotEmpty) {
       fetchNow();
@@ -48,7 +57,11 @@ class AlertsProvider extends ChangeNotifier {
     _isLoading = true;
     notifyListeners();
     try {
-      _alerts = await AlertsApiService.fetchAlerts(_baseUrl);
+      _alerts = await AlertsApiService.fetchAlerts(
+        _baseUrl,
+        criticalOnly: _criticalOnly,
+        deviceId: _deviceId,
+      );
     } catch (_) {
       // Keep previous list on transient failures
     } finally {
@@ -64,7 +77,11 @@ class AlertsProvider extends ChangeNotifier {
 
   Future<void> acknowledge(String alertId) async {
     if (_baseUrl.isEmpty) return;
-    final ok = await AlertsApiService.acknowledge(_baseUrl, alertId);
+    final ok = await AlertsApiService.acknowledge(
+      _baseUrl,
+      alertId,
+      deviceId: _deviceId,
+    );
     if (ok) {
       final idx = _alerts.indexWhere((a) => a.id == alertId);
       if (idx >= 0) {

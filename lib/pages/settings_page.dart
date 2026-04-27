@@ -66,8 +66,11 @@ class _SettingsPageState extends State<SettingsPage> {
       return;
     }
     setState(() => _isCheckingServer = true);
-    final health = await SensorApiService.checkHealth(baseUrl);
-    final latest = health ? await SensorApiService.fetchLatest(baseUrl) : null;
+    final deviceId = context.read<SettingsProvider>().deviceId;
+    final health = await SensorApiService.checkHealth(baseUrl, deviceId: deviceId);
+    final latest = health
+        ? await SensorApiService.fetchLatest(baseUrl, deviceId: deviceId)
+        : null;
     if (!mounted) return;
     setState(() {
       _isCheckingServer = false;
@@ -91,6 +94,21 @@ class _SettingsPageState extends State<SettingsPage> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     if (_showSavedMessage) _buildSavedBanner(),
+                    if (!context.watch<SettingsProvider>().lastRemoteSyncOk)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppColors.warning.withValues(alpha: 0.18),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Text(
+                            'تم الحفظ محليا لكن فشل الحفظ في قاعدة البيانات. تحقق من اتصال السيرفر.',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                        ),
+                      ),
                     const SizedBox(height: 16),
 
                     // إعدادات الصيانة
@@ -492,7 +510,7 @@ class _SettingsPageState extends State<SettingsPage> {
               _checkServerConnection();
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content: Text('تم حفظ عنوان السيرفر'),
+                  content: Text('تم حفظ عنوان السيرفر (محلياً) وجاري مزامنة قاعدة البيانات'),
                   backgroundColor: AppColors.success,
                 ),
               );

@@ -22,6 +22,7 @@ class _DashboardPageState extends State<DashboardPage> {
   int _currentInterval = 0;
   bool _wasLive = false;
   String _lastSensorUrl = '';
+  String _lastDeviceId = '';
   bool _liveFetchFailed = false;
   bool _isConnecting = false;
 
@@ -83,16 +84,19 @@ class _DashboardPageState extends State<DashboardPage> {
     final interval = settings.updateIntervalSeconds;
     final live = settings.useLiveSensors;
     final url = settings.sensorServerBaseUrl;
+    final deviceId = settings.deviceId;
 
     if (interval == _currentInterval &&
         live == _wasLive &&
-        url == _lastSensorUrl) {
+        url == _lastSensorUrl &&
+        deviceId == _lastDeviceId) {
       return;
     }
 
     _currentInterval = interval;
     _wasLive = live;
     _lastSensorUrl = url;
+    _lastDeviceId = deviceId;
     _timer?.cancel();
 
     if (live && url.isNotEmpty) {
@@ -100,10 +104,10 @@ class _DashboardPageState extends State<DashboardPage> {
         _isConnecting = true;
         _liveFetchFailed = false;
       });
-      _fetchLive(url);
+      _fetchLive(url, settings.deviceId);
       _timer = Timer.periodic(
         Duration(seconds: interval),
-        (_) => _fetchLive(url),
+        (_) => _fetchLive(url, settings.deviceId),
       );
     } else {
       setState(() {
@@ -115,8 +119,11 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  Future<void> _fetchLive(String baseUrl) async {
-    final payload = await SensorApiService.fetchLatest(baseUrl);
+  Future<void> _fetchLive(String baseUrl, String deviceId) async {
+    final payload = await SensorApiService.fetchLatest(
+      baseUrl,
+      deviceId: deviceId,
+    );
     if (!mounted) return;
     if (payload != null) {
       setState(() {

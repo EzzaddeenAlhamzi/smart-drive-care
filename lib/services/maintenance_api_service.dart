@@ -15,11 +15,14 @@ class MaintenanceApiService {
     return b;
   }
 
-  static Future<MaintenanceData?> fetchData(String baseUrl) async {
+  static Future<MaintenanceData?> fetchData(
+    String baseUrl, {
+    required String deviceId,
+  }) async {
     final b = _sanitizeBaseUrl(baseUrl);
     if (b.isEmpty) return null;
     try {
-      final uri = Uri.parse('$b/api/maintenance');
+      final uri = Uri.parse('$b/api/maintenance?deviceId=$deviceId');
       final res = await http.get(uri).timeout(const Duration(seconds: 12));
       if (res.statusCode != 200) return null;
       final map = jsonDecode(res.body) as Map<String, dynamic>;
@@ -31,16 +34,20 @@ class MaintenanceApiService {
     }
   }
 
-  static Future<bool> saveData(String baseUrl, MaintenanceData data) async {
+  static Future<bool> saveData(
+    String baseUrl,
+    MaintenanceData data, {
+    required String deviceId,
+  }) async {
     final b = _sanitizeBaseUrl(baseUrl);
     if (b.isEmpty) return false;
     try {
-      final uri = Uri.parse('$b/api/maintenance');
+      final uri = Uri.parse('$b/api/maintenance?deviceId=$deviceId');
       final res = await http
           .post(
             uri,
             headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'data': data.toJson()}),
+            body: jsonEncode({'deviceId': deviceId, 'data': data.toJson()}),
           )
           .timeout(const Duration(seconds: 12));
       return res.statusCode == 200;

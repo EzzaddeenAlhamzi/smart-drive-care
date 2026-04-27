@@ -18,6 +18,7 @@ class _DeviceConnectionPageState extends State<DeviceConnectionPage> {
   SensorBridgePayload? _latest;
   Timer? _pollTimer;
   String _lastBaseUrl = '';
+  String _lastDeviceId = '';
 
   @override
   void initState() {
@@ -28,9 +29,12 @@ class _DeviceConnectionPageState extends State<DeviceConnectionPage> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final baseUrl = context.watch<SettingsProvider>().sensorServerBaseUrl.trim();
-    if (baseUrl != _lastBaseUrl) {
+    final settings = context.watch<SettingsProvider>();
+    final baseUrl = settings.sensorServerBaseUrl.trim();
+    final deviceId = settings.deviceId.trim();
+    if (baseUrl != _lastBaseUrl || deviceId != _lastDeviceId) {
       _lastBaseUrl = baseUrl;
+      _lastDeviceId = deviceId;
       _applyPollingFromSettings();
     }
   }
@@ -61,10 +65,13 @@ class _DeviceConnectionPageState extends State<DeviceConnectionPage> {
 
   Future<void> _refreshConnection() async {
     final baseUrl = context.read<SettingsProvider>().sensorServerBaseUrl.trim();
+    final deviceId = context.read<SettingsProvider>().deviceId;
     if (baseUrl.isEmpty) return;
     if (mounted) setState(() => _isChecking = true);
-    final ok = await SensorApiService.checkHealth(baseUrl);
-    final latest = ok ? await SensorApiService.fetchLatest(baseUrl) : null;
+    final ok = await SensorApiService.checkHealth(baseUrl, deviceId: deviceId);
+    final latest = ok
+        ? await SensorApiService.fetchLatest(baseUrl, deviceId: deviceId)
+        : null;
     if (!mounted) return;
     setState(() {
       _isChecking = false;

@@ -39,7 +39,7 @@ class SensorBridgePayload {
 class SensorApiService {
   SensorApiService._();
 
-  static Uri _latestUri(String baseUrl) {
+  static Uri _latestUri(String baseUrl, {String? deviceId}) {
     var b = baseUrl.trim();
     if (b.isEmpty) throw ArgumentError('baseUrl فارغ');
     if (!b.startsWith('http://') && !b.startsWith('https://')) {
@@ -48,12 +48,17 @@ class SensorApiService {
     if (b.endsWith('/')) {
       b = b.substring(0, b.length - 1);
     }
-    return Uri.parse('$b/api/latest');
+    final id = (deviceId ?? '').trim();
+    if (id.isEmpty) return Uri.parse('$b/api/latest');
+    return Uri.parse('$b/api/latest?deviceId=${Uri.encodeQueryComponent(id)}');
   }
 
-  static Future<SensorBridgePayload?> fetchLatest(String baseUrl) async {
+  static Future<SensorBridgePayload?> fetchLatest(
+    String baseUrl, {
+    String? deviceId,
+  }) async {
     try {
-      final uri = _latestUri(baseUrl);
+      final uri = _latestUri(baseUrl, deviceId: deviceId);
       final res = await http.get(uri).timeout(const Duration(seconds: 12));
       if (res.statusCode != 200) return null;
       final map = jsonDecode(res.body) as Map<String, dynamic>;
@@ -63,7 +68,7 @@ class SensorApiService {
     }
   }
 
-  static Future<bool> checkHealth(String baseUrl) async {
+  static Future<bool> checkHealth(String baseUrl, {String? deviceId}) async {
     try {
       var b = baseUrl.trim();
       if (b.isEmpty) return false;
@@ -73,7 +78,10 @@ class SensorApiService {
       if (b.endsWith('/')) {
         b = b.substring(0, b.length - 1);
       }
-      final uri = Uri.parse('$b/api/health');
+      final id = (deviceId ?? '').trim();
+      final uri = id.isEmpty
+          ? Uri.parse('$b/api/health')
+          : Uri.parse('$b/api/health?deviceId=${Uri.encodeQueryComponent(id)}');
       final res = await http.get(uri).timeout(const Duration(seconds: 10));
       if (res.statusCode != 200) return false;
       final map = jsonDecode(res.body) as Map<String, dynamic>;

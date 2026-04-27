@@ -39,6 +39,7 @@ class _HistoryPageState extends State<HistoryPage> {
 
   Future<void> _fetchHistory() async {
     final baseUrl = context.read<SettingsProvider>().sensorServerBaseUrl;
+    final deviceId = context.read<SettingsProvider>().deviceId;
     if (baseUrl.trim().isEmpty) {
       setState(() {
         _historicalData = const [];
@@ -57,6 +58,7 @@ class _HistoryPageState extends State<HistoryPage> {
       final rows = await HistoryApiService.fetchHistory(
         baseUrl: baseUrl,
         period: _selectedPeriod,
+        deviceId: deviceId,
       );
       if (!mounted) return;
       setState(() {

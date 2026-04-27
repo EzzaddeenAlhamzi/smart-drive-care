@@ -18,11 +18,14 @@ class HistoryApiService {
   static Future<List<HistoricalData>> fetchHistory({
     required String baseUrl,
     required String period,
+    required String deviceId,
   }) async {
     final b = _sanitizeBaseUrl(baseUrl);
     if (b.isEmpty) return [];
 
-    final uri = Uri.parse('$b/api/history?period=$period');
+    final uri = Uri.parse(
+      '$b/api/history?period=$period&deviceId=${Uri.encodeQueryComponent(deviceId)}',
+    );
     final res = await http.get(uri).timeout(const Duration(seconds: 15));
     if (res.statusCode != 200) return [];
 

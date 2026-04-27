@@ -36,6 +36,7 @@ let latest = {
   gearOilLimit: GEAR_OIL_LIMIT,
   updatedAt: null,
 };
+const latestByDevice = new Map();
 
 let db = null;
 const lastAlertAt = new Map();
@@ -78,6 +79,11 @@ function toNumber(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function normalizeDeviceId(value) {
+  const id = String(value || '').trim();
+  return id || 'global';
+}
+
 function classifyReading(r) {
   const statuses = [];
   if (r.temp > 95) statuses.push('TEMP_CRITICAL');
@@ -104,7 +110,7 @@ function flagToLevel(flag) {
   return String(flag || '').includes('CRITICAL') ? 'CRITICAL' : 'WARNING';
 }
 
-async function maybeCreateAlert(reading, classification) {
+async function maybeCreateAlert(reading, classification, deviceId = 'global') {
   if (!db) return;
   if (!classification.statuses || classification.statuses.length === 0) return;
 
@@ -119,6 +125,7 @@ async function maybeCreateAlert(reading, classification) {
     lastAlertAt.set(key, now);
 
     await db.collection('alerts').add({
+      deviceId: normalizeDeviceId(deviceId),
       level,
       reason,
       status: 'ACTIVE',
@@ -168,10 +175,12 @@ function reasonToSensorType(reason) {
   return 'GENERIC';
 }
 
-async function readAlertsFromFirestore(limit = 200) {
+async function readAlertsFromFirestore(limit = 200, deviceId = 'global') {
   if (!db) return [];
+  const did = normalizeDeviceId(deviceId);
   const snap = await db
     .collection('alerts')
+    .where('deviceId', '==', did)
     .orderBy('createdAt', 'desc')
     .limit(limit)
     .get();
@@ -196,11 +205,14 @@ async function readAlertsFromFirestore(limit = 200) {
   });
 }
 
-async function acknowledgeAlert(alertId) {
+async function acknowledgeAlert(alertId, deviceId = 'global') {
   if (!db || !alertId) return false;
+  const did = normalizeDeviceId(deviceId);
   const ref = db.collection('alerts').doc(alertId);
   const snap = await ref.get();
   if (!snap.exists) return false;
+  const raw = snap.data() || {};
+  if ((raw.deviceId || 'global') !== did) return false;
   await ref.set(
     {
       status: 'ACKNOWLEDGED',
@@ -224,13 +236,16 @@ function periodToDurationMs(period) {
   }
 }
 
-async function readHistoryFromFirestore(period = 'today', limit = 200) {
+async function readHistoryFromFirestore(period = 'today', limit = 200, deviceId = 'global') {
   if (!db) return [];
+  const did = normalizeDeviceId(deviceId);
   const now = Date.now();
   const sinceMs = now - periodToDurationMs(period);
 
   const snap = await db
     .collection('sensor_readings')
+    .where('deviceId', '==', did)
+    .where('createdAt', '>=', new Date(sinceMs))
     .orderBy('createdAt', 'desc')
     .limit(limit)
     .get();
@@ -261,7 +276,7 @@ async function readHistoryFromFirestore(period = 'today', limit = 200) {
   }
 
   // ascending for charts
-  rows.sort((a, b) => String(a.timestamp).compareTo(String(b.timestamp)));
+  rows.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
   return rows;
 }
 
@@ -283,9 +298,9 @@ const DEFAULT_MAINTENANCE = {
   oilChangeHistory: [],
 };
 
-async function readAppSettings() {
+async function readAppSettings(deviceId = 'global') {
   if (!db) return DEFAULT_APP_SETTINGS;
-  const ref = db.collection('app_settings').doc('global');
+  const ref = db.collection('app_settings').doc(normalizeDeviceId(deviceId));
   const snap = await ref.get();
   if (!snap.exists) return DEFAULT_APP_SETTINGS;
   const data = snap.data() || {};
@@ -295,9 +310,9 @@ async function readAppSettings() {
   };
 }
 
-async function saveAppSettings(settings) {
+async function saveAppSettings(settings, deviceId = 'global') {
   if (!db) return false;
-  const ref = db.collection('app_settings').doc('global');
+  const ref = db.collection('app_settings').doc(normalizeDeviceId(deviceId));
   await ref.set(
     {
       ...DEFAULT_APP_SETTINGS,
@@ -309,9 +324,19 @@ async function saveAppSettings(settings) {
   return true;
 }
 
-async function readMaintenanceData() {
+async function getAppRetentionDays(deviceId = 'global') {
+  try {
+    const s = await readAppSettings(deviceId);
+    const d = toNumber(s.dataRetentionDays, 30);
+    return Math.max(1, Math.min(365, Math.round(d)));
+  } catch (_) {
+    return 30;
+  }
+}
+
+async function readMaintenanceData(deviceId = 'global') {
   if (!db) return DEFAULT_MAINTENANCE;
-  const ref = db.collection('app_maintenance').doc('global');
+  const ref = db.collection('app_maintenance').doc(normalizeDeviceId(deviceId));
   const snap = await ref.get();
   if (!snap.exists) return DEFAULT_MAINTENANCE;
   const data = snap.data() || {};
@@ -321,9 +346,9 @@ async function readMaintenanceData() {
   };
 }
 
-async function saveMaintenanceData(data) {
+async function saveMaintenanceData(data, deviceId = 'global') {
   if (!db) return false;
-  const ref = db.collection('app_maintenance').doc('global');
+  const ref = db.collection('app_maintenance').doc(normalizeDeviceId(deviceId));
   await ref.set(
     {
       ...DEFAULT_MAINTENANCE,
@@ -333,6 +358,47 @@ async function saveMaintenanceData(data) {
     { merge: true },
   );
   return true;
+}
+
+async function pruneOldSensorReadings(deviceId = 'global') {
+  if (!db) return;
+  const did = normalizeDeviceId(deviceId);
+  const retentionDays = await getAppRetentionDays(did);
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+  const snap = await db
+    .collection('sensor_readings')
+    .where('deviceId', '==', did)
+    .where('createdAt', '<', cutoff)
+    .limit(400)
+    .get();
+  if (snap.empty) return;
+  const batch = db.batch();
+  for (const doc of snap.docs) {
+    batch.delete(doc.ref);
+  }
+  await batch.commit();
+}
+
+async function readLatestFromFirestore(deviceId = 'global') {
+  if (!db) return null;
+  const snap = await db.collection('latest').doc(normalizeDeviceId(deviceId)).get();
+  if (!snap.exists) return null;
+  const d = snap.data() || {};
+  const createdAt =
+    d.createdAt && typeof d.createdAt.toDate === 'function'
+      ? d.createdAt.toDate().toISOString()
+      : null;
+  return {
+    temp: toNumber(d.temp),
+    battery: toNumber(d.battery),
+    engineOil: Math.max(0, Math.round(toNumber(d.engineOil))),
+    gearOil: Math.max(0, Math.round(toNumber(d.gearOil))),
+    engineOilLimit: Math.max(1, Math.round(toNumber(d.engineOilLimit, ENGINE_OIL_LIMIT))),
+    gearOilLimit: Math.max(1, Math.round(toNumber(d.gearOilLimit, GEAR_OIL_LIMIT))),
+    updatedAt: d.updatedAt || createdAt,
+    level: d.level || 'NORMAL',
+    flags: Array.isArray(d.flags) ? d.flags : [],
+  };
 }
 
 function parseJsonBody(req) {
@@ -356,11 +422,13 @@ function parseJsonBody(req) {
   });
 }
 
-async function persistReading(reading, classification = null) {
+async function persistReading(reading, classification = null, deviceId = 'global') {
   if (!db) return;
+  const did = normalizeDeviceId(deviceId);
 
   const c = classification ?? classifyReading(reading);
   const data = {
+    deviceId: did,
     ...reading,
     level: c.level,
     flags: c.statuses,
@@ -368,8 +436,9 @@ async function persistReading(reading, classification = null) {
   };
 
   await db.collection('sensor_readings').add(data);
-  await db.collection('latest').doc('current').set(data, { merge: true });
-  await maybeCreateAlert(reading, c);
+  await db.collection('latest').doc(did).set(data, { merge: true });
+  await maybeCreateAlert(reading, c, did);
+  await pruneOldSensorReadings(did);
 }
 
 initFirestore();
@@ -384,6 +453,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/update' || url.pathname.startsWith('/update')) {
+    const deviceId = normalizeDeviceId(url.searchParams.get('deviceId'));
     const reading = {
       temp: toNumber(url.searchParams.get('temp')),
       battery: toNumber(url.searchParams.get('battery')),
@@ -400,26 +470,37 @@ const server = http.createServer(async (req, res) => {
       level: classification.level,
       flags: classification.statuses,
     };
+    latestByDevice.set(deviceId, latest);
 
     // Return immediately for real-time UX, persist asynchronously.
     res.writeHead(200, corsHeaders({ 'Content-Type': 'text/plain; charset=utf-8' }));
     res.end('ok');
 
-    persistReading(reading, classification).catch((e) => {
+    persistReading(reading, classification, deviceId).catch((e) => {
       console.error('Persist error:', e.message);
     });
     return;
   }
 
   if (url.pathname === '/api/latest' || url.pathname === '/api/latest/') {
+    const deviceId = normalizeDeviceId(url.searchParams.get('deviceId'));
+    let payload = latestByDevice.get(deviceId) || latest;
+    if (!payload.updatedAt) {
+      const fromDb = await readLatestFromFirestore(deviceId);
+      if (fromDb) {
+        payload = fromDb;
+        latestByDevice.set(deviceId, payload);
+      }
+    }
     res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
-    res.end(JSON.stringify(latest));
+    res.end(JSON.stringify(payload));
     return;
   }
 
   if (url.pathname === '/api/health' || url.pathname === '/api/health/') {
     const body = JSON.stringify({
       ok: true,
+      deviceId: normalizeDeviceId(url.searchParams.get('deviceId')),
       firestoreConnected: Boolean(db),
       now: new Date().toISOString(),
     });
@@ -431,7 +512,12 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/alerts' || url.pathname === '/api/alerts/') {
     try {
       const limit = Math.max(1, Math.min(500, Math.round(toNumber(url.searchParams.get('limit'), 200))));
-      const alerts = await readAlertsFromFirestore(limit);
+      const deviceId = normalizeDeviceId(url.searchParams.get('deviceId'));
+      const criticalOnly = (url.searchParams.get('criticalOnly') || '').toLowerCase() === 'true';
+      let alerts = await readAlertsFromFirestore(limit, deviceId);
+      if (criticalOnly) {
+        alerts = alerts.filter((a) => (a.level || '').toUpperCase() === 'CRITICAL');
+      }
       res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
       res.end(JSON.stringify({ alerts }));
     } catch (e) {
@@ -445,7 +531,8 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/alerts/ack' || url.pathname === '/api/alerts/ack/') {
     try {
       const id = url.searchParams.get('id');
-      const ok = await acknowledgeAlert(id);
+      const deviceId = normalizeDeviceId(url.searchParams.get('deviceId'));
+      const ok = await acknowledgeAlert(id, deviceId);
       res.writeHead(ok ? 200 : 404, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
       res.end(JSON.stringify({ ok }));
     } catch (e) {
@@ -459,10 +546,11 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/history' || url.pathname === '/api/history/') {
     try {
       const period = url.searchParams.get('period') || 'today';
+      const deviceId = normalizeDeviceId(url.searchParams.get('deviceId'));
       const limit = Math.max(10, Math.min(1000, Math.round(toNumber(url.searchParams.get('limit'), 240))));
-      const rows = await readHistoryFromFirestore(period, limit);
+      const rows = await readHistoryFromFirestore(period, limit, deviceId);
       res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
-      res.end(JSON.stringify({ period, count: rows.length, rows }));
+      res.end(JSON.stringify({ deviceId, period, count: rows.length, rows }));
     } catch (e) {
       console.error('Read history error:', e.message);
       res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
@@ -474,9 +562,10 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/settings' || url.pathname === '/api/settings/') {
     if (req.method === 'GET') {
       try {
-        const settings = await readAppSettings();
+        const deviceId = normalizeDeviceId(url.searchParams.get('deviceId'));
+        const settings = await readAppSettings(deviceId);
         res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
-        res.end(JSON.stringify({ ok: true, settings }));
+        res.end(JSON.stringify({ ok: true, deviceId, settings }));
       } catch (e) {
         console.error('Read settings error:', e.message);
         res.writeHead(500, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
@@ -488,10 +577,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST') {
       try {
         const body = await parseJsonBody(req);
+        const deviceId = normalizeDeviceId(url.searchParams.get('deviceId') || body.deviceId);
         const settings = (body && body.settings) || {};
-        const ok = await saveAppSettings(settings);
+        const ok = await saveAppSettings(settings, deviceId);
         res.writeHead(ok ? 200 : 500, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
-        res.end(JSON.stringify({ ok }));
+        res.end(JSON.stringify({ ok, deviceId }));
       } catch (e) {
         console.error('Save settings error:', e.message);
         res.writeHead(400, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
@@ -504,9 +594,10 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/maintenance' || url.pathname === '/api/maintenance/') {
     if (req.method === 'GET') {
       try {
-        const data = await readMaintenanceData();
+        const deviceId = normalizeDeviceId(url.searchParams.get('deviceId'));
+        const data = await readMaintenanceData(deviceId);
         res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
-        res.end(JSON.stringify({ ok: true, data }));
+        res.end(JSON.stringify({ ok: true, deviceId, data }));
       } catch (e) {
         console.error('Read maintenance error:', e.message);
         res.writeHead(500, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
@@ -518,10 +609,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST') {
       try {
         const body = await parseJsonBody(req);
+        const deviceId = normalizeDeviceId(url.searchParams.get('deviceId') || body.deviceId);
         const data = (body && body.data) || {};
-        const ok = await saveMaintenanceData(data);
+        const ok = await saveMaintenanceData(data, deviceId);
         res.writeHead(ok ? 200 : 500, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
-        res.end(JSON.stringify({ ok }));
+        res.end(JSON.stringify({ ok, deviceId }));
       } catch (e) {
         console.error('Save maintenance error:', e.message);
         res.writeHead(400, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));

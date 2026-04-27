@@ -21,15 +21,20 @@ class MaintenanceProvider extends ChangeNotifier {
 
   MaintenanceData get data => _data;
   String _baseUrl = '';
+  String _deviceId = '';
+  bool _lastRemoteSyncOk = true;
+  bool get lastRemoteSyncOk => _lastRemoteSyncOk;
 
   MaintenanceProvider() {
     _load();
   }
 
-  void configureServer(String baseUrl) {
+  void configureServer(String baseUrl, {String deviceId = ''}) {
     final normalized = baseUrl.trim();
-    if (normalized == _baseUrl) return;
+    final id = deviceId.trim();
+    if (normalized == _baseUrl && id == _deviceId) return;
     _baseUrl = normalized;
+    _deviceId = id;
     if (_baseUrl.isNotEmpty) {
       _loadFromServer();
     }
@@ -66,7 +71,10 @@ class MaintenanceProvider extends ChangeNotifier {
   }
 
   Future<void> _loadFromServer() async {
-    final remote = await MaintenanceApiService.fetchData(_baseUrl);
+    final remote = await MaintenanceApiService.fetchData(
+      _baseUrl,
+      deviceId: _deviceId,
+    );
     if (remote == null) return;
     _data = remote;
     await _save();
@@ -77,8 +85,15 @@ class MaintenanceProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_storageKey, jsonEncode(_data.toJson()));
     if (_baseUrl.isNotEmpty) {
-      await MaintenanceApiService.saveData(_baseUrl, _data);
+      _lastRemoteSyncOk = await MaintenanceApiService.saveData(
+        _baseUrl,
+        _data,
+        deviceId: _deviceId,
+      );
+    } else {
+      _lastRemoteSyncOk = true;
     }
+    notifyListeners();
   }
 
   void updateCurrentMileage(int mileage) {

@@ -52,8 +52,15 @@ class _RootLayoutState extends State<RootLayout> {
     return Consumer<AlertsProvider>(
       builder: (context, alertsProvider, _) {
         final settings = context.watch<SettingsProvider>();
-        alertsProvider.configureServer(settings.sensorServerBaseUrl);
-        context.read<MaintenanceProvider>().configureServer(settings.sensorServerBaseUrl);
+        alertsProvider.configureServer(
+          settings.sensorServerBaseUrl,
+          criticalOnly: settings.criticalAlertsOnly,
+          deviceId: settings.deviceId,
+        );
+        context.read<MaintenanceProvider>().configureServer(
+          settings.sensorServerBaseUrl,
+          deviceId: settings.deviceId,
+        );
         final badgeCount = alertsProvider.unacknowledgedCount;
         return Directionality(
           textDirection: TextDirection.rtl,

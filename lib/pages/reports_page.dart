@@ -47,6 +47,7 @@ class _ReportsPageState extends State<ReportsPage> {
 
   Future<void> _fetchData() async {
     final baseUrl = context.read<SettingsProvider>().sensorServerBaseUrl;
+    final deviceId = context.read<SettingsProvider>().deviceId;
     if (baseUrl.trim().isEmpty) {
       setState(() {
         _rows = const [];
@@ -64,8 +65,12 @@ class _ReportsPageState extends State<ReportsPage> {
 
     try {
       final results = await Future.wait([
-        HistoryApiService.fetchHistory(baseUrl: baseUrl, period: 'month'),
-        AlertsApiService.fetchAlerts(baseUrl),
+        HistoryApiService.fetchHistory(
+          baseUrl: baseUrl,
+          period: 'month',
+          deviceId: deviceId,
+        ),
+        AlertsApiService.fetchAlerts(baseUrl, deviceId: deviceId),
       ]);
       if (!mounted) return;
       setState(() {

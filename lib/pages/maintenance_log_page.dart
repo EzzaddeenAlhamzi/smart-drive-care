@@ -26,6 +26,19 @@ class MaintenanceLogPage extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    if (!maintenance.lastRemoteSyncOk)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: AppColors.warning.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Text(
+                          'فشل مزامنة سجل الصيانة مع قاعدة البيانات. تم الحفظ محليا فقط حاليا.',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                      ),
                     Align(
                       alignment: Alignment.centerLeft,
                       child: FilledButton.icon(
