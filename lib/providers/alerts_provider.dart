@@ -1,14 +1,17 @@
-import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:async';
 import '../models/alert.dart';
-
-const _storageKey = 'alerts_data';
+import '../services/alerts_api_service.dart';
 
 class AlertsProvider extends ChangeNotifier {
   List<Alert> _alerts = [];
+  String _baseUrl = '';
+  Timer? _pollTimer;
+  bool _isLoading = false;
 
   List<Alert> get alerts => _alerts;
+  bool get isLoading => _isLoading;
+  String get baseUrl => _baseUrl;
 
   List<Alert> get unacknowledgedAlerts =>
       _alerts.where((a) => !a.acknowledged).toList()
@@ -20,106 +23,56 @@ class AlertsProvider extends ChangeNotifier {
 
   int get unacknowledgedCount => _alerts.where((a) => !a.acknowledged).length;
 
-  AlertsProvider() {
-    _load();
-    if (_alerts.isEmpty) {
-      _alerts = _generateSampleAlerts();
-      _save();
+  AlertsProvider();
+
+  void configureServer(String baseUrl) {
+    final normalized = baseUrl.trim();
+    if (normalized == _baseUrl) return;
+    _baseUrl = normalized;
+    _pollTimer?.cancel();
+    if (_baseUrl.isNotEmpty) {
+      fetchNow();
+      _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) => fetchNow());
+    } else {
+      _alerts = [];
+      notifyListeners();
     }
   }
 
-  List<Alert> _generateSampleAlerts() {
-    final now = DateTime.now();
-    return [
-      Alert(
-        id: '1',
-        alertType: 'HIGH_TEMP',
-        riskLevel: 'CRITICAL',
-        message: 'ارتفاع درجة حرارة المحرك بشكل خطير',
-        suggestedAction:
-            'أوقف المحرك فوراً وانتظر حتى يبرد. تحقق من مستوى سائل التبريد ومروحة التبريد.',
-        timestamp: now.subtract(const Duration(minutes: 5)),
-        sensorType: 'TEMP',
-      ),
-      Alert(
-        id: '2',
-        alertType: 'LOW_OIL',
-        riskLevel: 'HIGH',
-        message: 'انخفاض مستوى زيت المحرك',
-        suggestedAction:
-            'تحقق من مستوى الزيت وأضف الزيت إذا لزم الأمر. قد تحتاج لتغيير الزيت قريباً.',
-        timestamp: now.subtract(const Duration(minutes: 30)),
-        sensorType: 'OIL',
-      ),
-      Alert(
-        id: '3',
-        alertType: 'BATTERY_LOW',
-        riskLevel: 'MEDIUM',
-        message: 'انخفاض جهد البطارية',
-        suggestedAction: 'تحقق من البطارية والمولد. قد تحتاج لشحن أو استبدال البطارية.',
-        timestamp: now.subtract(const Duration(hours: 2)),
-        sensorType: 'BATTERY',
-      ),
-      Alert(
-        id: '4',
-        alertType: 'TRANS_OIL',
-        riskLevel: 'LOW',
-        message: 'انتباه: زيت ناقل الحركة',
-        suggestedAction: 'راجع سجل الصيانة. قد تحتاج لتغيير زيت القير في المستقبل.',
-        timestamp: now.subtract(const Duration(days: 1)),
-        sensorType: 'TRANS',
-      ),
-      Alert(
-        id: '5',
-        alertType: 'HIGH_TEMP',
-        riskLevel: 'MEDIUM',
-        message: 'ارتفاع طفيف في حرارة المحرك',
-        suggestedAction: 'راقب القراءات. إذا استمر الارتفاع، أوقف المحرك.',
-        timestamp: now.subtract(const Duration(days: 2)),
-        acknowledged: true,
-        sensorType: 'TEMP',
-      ),
-    ];
-  }
-
-  Future<void> reload() async {
-    _alerts = [];
-    await _load();
-    if (_alerts.isEmpty) {
-      _alerts = _generateSampleAlerts();
-      _save();
+  Future<void> fetchNow() async {
+    if (_baseUrl.isEmpty) {
+      _alerts = [];
+      notifyListeners();
+      return;
     }
+    _isLoading = true;
     notifyListeners();
-  }
-
-  Future<void> _load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_storageKey);
-    if (raw != null) {
-      try {
-        final list = jsonDecode(raw) as List;
-        _alerts = list
-            .map((e) => Alert.fromJson(e as Map<String, dynamic>))
-            .toList();
-      } catch (_) {}
+    try {
+      _alerts = await AlertsApiService.fetchAlerts(_baseUrl);
+    } catch (_) {
+      // Keep previous list on transient failures
+    } finally {
+      _isLoading = false;
+      notifyListeners();
     }
-    notifyListeners();
   }
 
-  Future<void> _save() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _storageKey,
-      jsonEncode(_alerts.map((e) => e.toJson()).toList()),
-    );
-    notifyListeners();
-  }
-
-  void acknowledge(String alertId) {
-    final idx = _alerts.indexWhere((a) => a.id == alertId);
-    if (idx >= 0) {
-      _alerts[idx] = _alerts[idx].copyWith(acknowledged: true);
-      _save();
+  Future<void> acknowledge(String alertId) async {
+    if (_baseUrl.isEmpty) return;
+    final ok = await AlertsApiService.acknowledge(_baseUrl, alertId);
+    if (ok) {
+      final idx = _alerts.indexWhere((a) => a.id == alertId);
+      if (idx >= 0) {
+        _alerts[idx] = _alerts[idx].copyWith(acknowledged: true);
+      }
+      notifyListeners();
+      await fetchNow();
     }
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
   }
 }

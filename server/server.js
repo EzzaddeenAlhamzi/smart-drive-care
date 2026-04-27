@@ -10,6 +10,8 @@
  * - GET /update?temp=&battery=&engineOil=&gearOil=
  * - GET /api/latest
  * - GET /api/health
+ * - GET /api/alerts
+ * - GET /api/alerts/ack?id=<alertDocId>
  */
 
 const http = require('http');
@@ -108,9 +110,93 @@ async function maybeCreateAlert(reading, classification) {
     level: classification.level,
     reason,
     status: 'ACTIVE',
+    acknowledged: false,
     reading,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
+}
+
+function reasonToMessage(reason) {
+  const r = reason || '';
+  if (r.includes('TEMP_CRITICAL')) return 'ارتفاع درجة حرارة المحرك بشكل خطير';
+  if (r.includes('TEMP_WARNING')) return 'ارتفاع حرارة المحرك';
+  if (r.includes('BATTERY_CRITICAL')) return 'انخفاض حرج في جهد البطارية';
+  if (r.includes('BATTERY_WARNING')) return 'انخفاض جهد البطارية';
+  if (r.includes('ENGINE_OIL_CRITICAL')) return 'انخفاض حرج في زيت المحرك';
+  if (r.includes('ENGINE_OIL_WARNING')) return 'انخفاض زيت المحرك';
+  if (r.includes('GEAR_OIL_CRITICAL')) return 'انخفاض حرج في زيت القير';
+  if (r.includes('GEAR_OIL_WARNING')) return 'انخفاض زيت القير';
+  return 'تنبيه من الحساسات';
+}
+
+function reasonToAction(reason) {
+  const r = reason || '';
+  if (r.includes('TEMP')) {
+    return 'افحص نظام التبريد وأوقف المركبة إذا استمرت الحرارة بالارتفاع.';
+  }
+  if (r.includes('BATTERY')) {
+    return 'افحص البطارية والدينمو والتوصيلات الكهربائية.';
+  }
+  if (r.includes('ENGINE_OIL')) {
+    return 'افحص مستوى زيت المحرك وقم بالتغيير أو التعبئة عند الحاجة.';
+  }
+  if (r.includes('GEAR_OIL')) {
+    return 'افحص زيت القير وجدول الصيانة الخاص بناقل الحركة.';
+  }
+  return 'راجع نظام الصيانة واتخذ الإجراء المناسب.';
+}
+
+function reasonToSensorType(reason) {
+  const r = reason || '';
+  if (r.includes('TEMP')) return 'TEMP';
+  if (r.includes('BATTERY')) return 'BATTERY';
+  if (r.includes('ENGINE_OIL')) return 'OIL';
+  if (r.includes('GEAR_OIL')) return 'TRANS';
+  return 'GENERIC';
+}
+
+async function readAlertsFromFirestore(limit = 200) {
+  if (!db) return [];
+  const snap = await db
+    .collection('alerts')
+    .orderBy('createdAt', 'desc')
+    .limit(limit)
+    .get();
+  return snap.docs.map((doc) => {
+    const d = doc.data();
+    const createdAt =
+      d.createdAt && typeof d.createdAt.toDate === 'function'
+        ? d.createdAt.toDate().toISOString()
+        : null;
+    return {
+      id: doc.id,
+      level: d.level ?? 'WARNING',
+      status: d.status ?? 'ACTIVE',
+      acknowledged: Boolean(d.acknowledged ?? false) || d.status === 'ACKNOWLEDGED',
+      reason: d.reason ?? '',
+      message: reasonToMessage(d.reason),
+      suggestedAction: reasonToAction(d.reason),
+      sensorType: reasonToSensorType(d.reason),
+      createdAt,
+      reading: d.reading ?? null,
+    };
+  });
+}
+
+async function acknowledgeAlert(alertId) {
+  if (!db || !alertId) return false;
+  const ref = db.collection('alerts').doc(alertId);
+  const snap = await ref.get();
+  if (!snap.exists) return false;
+  await ref.set(
+    {
+      status: 'ACKNOWLEDGED',
+      acknowledged: true,
+      acknowledgedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true },
+  );
+  return true;
 }
 
 async function persistReading(reading) {
@@ -208,6 +294,34 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === '/api/alerts' || url.pathname === '/api/alerts/') {
+    try {
+      const limit = Math.max(1, Math.min(500, Math.round(toNumber(url.searchParams.get('limit'), 200))));
+      const alerts = await readAlertsFromFirestore(limit);
+      res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+      res.end(JSON.stringify({ alerts }));
+    } catch (e) {
+      console.error('Read alerts error:', e.message);
+      res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+      res.end(JSON.stringify({ alerts: [] }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/alerts/ack' || url.pathname === '/api/alerts/ack/') {
+    try {
+      const id = url.searchParams.get('id');
+      const ok = await acknowledgeAlert(id);
+      res.writeHead(ok ? 200 : 404, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+      res.end(JSON.stringify({ ok }));
+    } catch (e) {
+      console.error('Acknowledge alert error:', e.message);
+      res.writeHead(500, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+      res.end(JSON.stringify({ ok: false }));
+    }
+    return;
+  }
+
   if (url.pathname === '/' || url.pathname === '') {
     res.writeHead(200, corsHeaders({ 'Content-Type': 'text/plain; charset=utf-8' }));
     res.end('Smart Drive Care sensor bridge. GET /api/latest — target for ESP: /update?...');
@@ -222,5 +336,6 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`Sensor bridge: http://localhost:${PORT}`);
   console.log('  ESP/Wokwi → GET /update?temp=&battery=&engineOil=&gearOil=');
   console.log('  Flutter   → GET /api/latest');
+  console.log('  Alerts    → GET /api/alerts , GET /api/alerts/ack?id=');
   console.log('  Health    → GET /api/health');
 });

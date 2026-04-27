@@ -52,4 +52,34 @@ class Alert {
         acknowledged: json['acknowledged'] as bool? ?? false,
         sensorType: json['sensorType'] as String,
       );
+
+  factory Alert.fromServer(Map<String, dynamic> json) {
+    final rawLevel = (json['level'] as String? ?? 'WARNING').toUpperCase();
+    final riskLevel = switch (rawLevel) {
+      'CRITICAL' => 'CRITICAL',
+      'WARNING' => 'HIGH',
+      'HIGH' => 'HIGH',
+      'MEDIUM' => 'MEDIUM',
+      'LOW' => 'LOW',
+      _ => 'MEDIUM',
+    };
+
+    DateTime ts;
+    try {
+      ts = DateTime.parse(json['createdAt'] as String).toLocal();
+    } catch (_) {
+      ts = DateTime.now();
+    }
+
+    return Alert(
+      id: (json['id'] as String?) ?? DateTime.now().millisecondsSinceEpoch.toString(),
+      alertType: (json['reason'] as String?) ?? 'SENSOR_ALERT',
+      riskLevel: riskLevel,
+      message: (json['message'] as String?) ?? 'تنبيه من الحساسات',
+      suggestedAction: (json['suggestedAction'] as String?) ?? 'راجع بيانات الحساسات واتخذ الإجراء المناسب.',
+      timestamp: ts,
+      acknowledged: json['acknowledged'] as bool? ?? ((json['status'] as String?) == 'ACKNOWLEDGED'),
+      sensorType: (json['sensorType'] as String?) ?? 'GENERIC',
+    );
+  }
 }

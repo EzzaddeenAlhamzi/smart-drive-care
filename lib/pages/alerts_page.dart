@@ -44,6 +44,15 @@ class AlertsPage extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    if (provider.isLoading && provider.alerts.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: _EmptyState(
+                          icon: Icons.sync,
+                          message: 'جاري جلب التنبيهات الحية...',
+                        ),
+                      ),
+
                     // بطاقات الإحصائيات 2x2
                     GridView.count(
                       crossAxisCount: 2,
@@ -133,9 +142,9 @@ class AlertsPage extends StatelessWidget {
       builder: (ctx) => _AlertDetailSheet(
         alert: alert,
         formatTimestamp: _formatTimestamp,
-        onAcknowledge: () {
-          provider.acknowledge(alert.id);
+        onAcknowledge: () async {
           Navigator.pop(ctx);
+          await provider.acknowledge(alert.id);
         },
       ),
     );

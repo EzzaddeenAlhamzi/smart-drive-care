@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/alerts_provider.dart';
+import '../providers/settings_provider.dart';
 import '../theme/app_theme.dart';
 import '../pages/dashboard_page.dart';
 import '../pages/alerts_page.dart';
@@ -49,6 +50,8 @@ class _RootLayoutState extends State<RootLayout> {
   Widget build(BuildContext context) {
     return Consumer<AlertsProvider>(
       builder: (context, alertsProvider, _) {
+        final settings = context.watch<SettingsProvider>();
+        alertsProvider.configureServer(settings.sensorServerBaseUrl);
         final badgeCount = alertsProvider.unacknowledgedCount;
         return Directionality(
           textDirection: TextDirection.rtl,
