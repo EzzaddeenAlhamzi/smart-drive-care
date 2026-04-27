@@ -1,0 +1,7 @@
+{
+  "name": "smart-drive-care-sensor-bridge",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  }
+}

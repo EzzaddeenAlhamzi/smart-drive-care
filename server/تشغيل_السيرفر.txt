@@ -1,0 +1,25 @@
+تشغيل السيرفر الوسيط (داخل مجلد المشروع)
+========================================
+
+1) ثبّت Node.js من https://nodejs.org
+
+2) من PowerShell أو CMD:
+   cd المسار\smart_drive_care\server
+   node server.js
+
+   أو: npm start
+
+3) اختبر من المتصفح:
+   http://localhost:3000/api/latest
+
+4) Wokwi (sketch.ino):
+   String serverURL = "http://localhost:3000/update";
+   — على جهازك فقط. من Wokwi السحابي استخدم ngrok أو استضافة.
+
+5) تطبيق Flutter — الإعدادات — «عنوان سيرفر الحساسات»:
+   - Chrome / الويب (localhost): http://localhost:3000
+   - محاكي Android: http://10.0.2.2:3000
+   - هاتف وكمبيوتر على نفس WiFi: http://IP_الكمبيوتر:3000
+   - إنترنت عام: رابط ngrok مثل https://xxxx.ngrok-free.app (بدون /update)
+
+6) اترك الحقل فارغاً في الإعدادات للعودة لوضع المحاكاة المحلية.
