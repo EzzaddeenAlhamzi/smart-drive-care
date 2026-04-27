@@ -95,25 +95,33 @@ function classifyReading(r) {
   return { level: 'NORMAL', statuses: [] };
 }
 
+function flagToLevel(flag) {
+  return String(flag || '').includes('CRITICAL') ? 'CRITICAL' : 'WARNING';
+}
+
 async function maybeCreateAlert(reading, classification) {
   if (!db) return;
-  if (classification.level === 'NORMAL') return;
+  if (!classification.statuses || classification.statuses.length === 0) return;
 
-  const reason = classification.statuses.join('|');
-  const key = `${classification.level}:${reason}`;
   const now = Date.now();
-  const prev = lastAlertAt.get(key) ?? 0;
-  if (now - prev < ALERT_COOLDOWN_MS) return;
-  lastAlertAt.set(key, now);
+  for (const reason of classification.statuses) {
+    const level = flagToLevel(reason);
+    const key = `${level}:${reason}`;
+    const prev = lastAlertAt.get(key) ?? 0;
+    if (now - prev < ALERT_COOLDOWN_MS) {
+      continue;
+    }
+    lastAlertAt.set(key, now);
 
-  await db.collection('alerts').add({
-    level: classification.level,
-    reason,
-    status: 'ACTIVE',
-    acknowledged: false,
-    reading,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+    await db.collection('alerts').add({
+      level,
+      reason,
+      status: 'ACTIVE',
+      acknowledged: false,
+      reading,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  }
 }
 
 function reasonToMessage(reason) {

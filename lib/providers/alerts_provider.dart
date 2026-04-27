@@ -57,6 +57,11 @@ class AlertsProvider extends ChangeNotifier {
     }
   }
 
+  /// توافق مع الاستدعاءات القديمة من صفحة الإعدادات.
+  Future<void> reload() async {
+    await fetchNow();
+  }
+
   Future<void> acknowledge(String alertId) async {
     if (_baseUrl.isEmpty) return;
     final ok = await AlertsApiService.acknowledge(_baseUrl, alertId);

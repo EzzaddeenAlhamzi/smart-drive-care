@@ -2,15 +2,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart' as intl;
-import '../providers/maintenance_provider.dart';
 import '../providers/settings_provider.dart';
 import '../models/sensor_reading.dart';
 import '../services/sensor_api_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/sensor_card.dart';
-import '../widgets/oil_change_card.dart';
-import '../widgets/mileage_update_dialog.dart';
-import '../widgets/oil_change_dialog.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -20,19 +16,14 @@ class DashboardPage extends StatefulWidget {
 }
 
 class _DashboardPageState extends State<DashboardPage> {
-  late List<SensorReading> _readings;
+  List<SensorReading> _readings = const [];
+  SensorBridgePayload? _payload;
   Timer? _timer;
   int _currentInterval = 0;
   bool _wasLive = false;
   String _lastSensorUrl = '';
   bool _liveFetchFailed = false;
-  bool _liveHadSuccessfulFetch = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _readings = _initialReadings();
-  }
+  bool _isConnecting = false;
 
   @override
   void dispose() {
@@ -40,87 +31,8 @@ class _DashboardPageState extends State<DashboardPage> {
     super.dispose();
   }
 
-  List<SensorReading> _initialReadings() {
-    final now = DateTime.now();
-    return [
-      SensorReading(
-        sensorType: 'OIL',
-        value: 72,
-        unit: '%',
-        status: 'NORMAL',
-        timestamp: now,
-        label: 'زيت المحرك',
-        trend: 'stable',
-      ),
-      SensorReading(
-        sensorType: 'TEMP',
-        value: 82,
-        unit: '°',
-        timestamp: now,
-        status: 'NORMAL',
-        label: 'حرارة المحرك',
-        trend: 'stable',
-      ),
-      SensorReading(
-        sensorType: 'BATTERY',
-        value: 12.5,
-        unit: 'V',
-        timestamp: now,
-        status: 'NORMAL',
-        label: 'البطارية',
-        trend: 'stable',
-      ),
-      SensorReading(
-        sensorType: 'TRANS',
-        value: 65,
-        unit: '%',
-        timestamp: now,
-        status: 'NORMAL',
-        label: 'زيت القير',
-        trend: 'stable',
-      ),
-    ];
-  }
-
-  void _simulateUpdate() {
-    setState(() {
-      _readings = _readings.map((r) {
-        final change = (DateTime.now().millisecond % 3 - 1) * 0.8;
-        double newVal = r.value + change;
-        if (r.sensorType == 'BATTERY') {
-          newVal = newVal.clamp(11.0, 14.0);
-        } else {
-          newVal = newVal.clamp(0.0, 100.0);
-        }
-        String status = 'NORMAL';
-        if (r.sensorType == 'TEMP') {
-          if (newVal > 95) {
-            status = 'CRITICAL';
-          } else if (newVal > 85) {
-            status = 'WARNING';
-          }
-        } else if (r.sensorType == 'OIL' || r.sensorType == 'TRANS') {
-          if (newVal < 30) {
-            status = 'CRITICAL';
-          } else if (newVal < 50) {
-            status = 'WARNING';
-          }
-        }
-        String trend = change > 0.5 ? 'up' : (change < -0.5 ? 'down' : 'stable');
-        return SensorReading(
-          sensorType: r.sensorType,
-          value: newVal,
-          unit: r.unit,
-          status: status,
-          timestamp: DateTime.now(),
-          label: r.label,
-          trend: trend,
-        );
-      }).toList();
-    });
-  }
-
   String get _overallStatus {
+    if (_readings.isEmpty) return 'غير متاح';
     if (_readings.any((r) => r.status == 'CRITICAL')) return 'حرجة';
     if (_readings.any((r) => r.status == 'WARNING')) return 'تحذير';
     return 'طبيعي';
@@ -132,6 +44,8 @@ class _DashboardPageState extends State<DashboardPage> {
         return AppColors.critical;
       case 'تحذير':
         return AppColors.warning;
+      case 'غير متاح':
+        return Colors.blueGrey;
       default:
         return AppColors.success;
     }
@@ -143,6 +57,8 @@ class _DashboardPageState extends State<DashboardPage> {
         return 'حالة حرجة - يتطلب تدخل فوري';
       case 'تحذير':
         return 'تحذير - يتطلب مراقبة';
+      case 'غير متاح':
+        return 'بانتظار وصول قراءة من الحساسات';
       default:
         return 'جميع الأنظمة تعمل بشكل طبيعي';
     }
@@ -168,7 +84,9 @@ class _DashboardPageState extends State<DashboardPage> {
     final live = settings.useLiveSensors;
     final url = settings.sensorServerBaseUrl;
 
-    if (interval == _currentInterval && live == _wasLive && url == _lastSensorUrl) {
+    if (interval == _currentInterval &&
+        live == _wasLive &&
+        url == _lastSensorUrl) {
       return;
     }
 
@@ -178,12 +96,9 @@ class _DashboardPageState extends State<DashboardPage> {
     _timer?.cancel();
 
     if (live && url.isNotEmpty) {
-      Future.microtask(() {
-        if (!mounted) return;
-        setState(() {
-          _liveFetchFailed = false;
-          _liveHadSuccessfulFetch = false;
-        });
+      setState(() {
+        _isConnecting = true;
+        _liveFetchFailed = false;
       });
       _fetchLive(url);
       _timer = Timer.periodic(
@@ -192,14 +107,11 @@ class _DashboardPageState extends State<DashboardPage> {
       );
     } else {
       setState(() {
-        _readings = _initialReadings();
+        _readings = const [];
+        _payload = null;
         _liveFetchFailed = false;
-        _liveHadSuccessfulFetch = false;
+        _isConnecting = false;
       });
-      _timer = Timer.periodic(
-        Duration(seconds: interval),
-        (_) => _simulateUpdate(),
-      );
     }
   }
 
@@ -208,26 +120,29 @@ class _DashboardPageState extends State<DashboardPage> {
     if (!mounted) return;
     if (payload != null) {
       setState(() {
+        _payload = payload;
         _readings = _mapPayloadToReadings(payload);
         _liveFetchFailed = false;
-        _liveHadSuccessfulFetch = true;
+        _isConnecting = false;
       });
     } else {
       setState(() {
         _liveFetchFailed = true;
-        _liveHadSuccessfulFetch = false;
+        _isConnecting = false;
       });
     }
   }
 
   List<SensorReading> _mapPayloadToReadings(SensorBridgePayload p) {
     final now = DateTime.now();
-    final oilPct = p.engineOilLimit > 0
-        ? (p.engineOil / p.engineOilLimit * 100).clamp(0.0, 100.0)
-        : 0.0;
-    final transPct = p.gearOilLimit > 0
-        ? (p.gearOil / p.gearOilLimit * 100).clamp(0.0, 100.0)
-        : 0.0;
+    final oilPct =
+        p.engineOilLimit > 0
+            ? (p.engineOil / p.engineOilLimit * 100).clamp(0.0, 100.0)
+            : 0.0;
+    final transPct =
+        p.gearOilLimit > 0
+            ? (p.gearOil / p.gearOilLimit * 100).clamp(0.0, 100.0)
+            : 0.0;
 
     String tempSt = 'NORMAL';
     if (p.temp > 95) {
@@ -306,7 +221,10 @@ class _DashboardPageState extends State<DashboardPage> {
     ];
   }
 
-  (double value, String unit) _formatTempForDisplay(SensorReading r, String tempUnit) {
+  (double value, String unit) _formatTempForDisplay(
+    SensorReading r,
+    String tempUnit,
+  ) {
     if (r.sensorType != 'TEMP') return (r.value, r.unit);
     if (tempUnit == 'fahrenheit') {
       final f = r.value * 9 / 5 + 32;
@@ -316,18 +234,22 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   List<Widget> _buildSensorRows(SettingsProvider settings) {
-    final cards = _readings.map((r) {
-      final (value, unit) = _formatTempForDisplay(r, settings.temperatureUnit);
-      return SensorCard(
-        label: r.label,
-        value: value,
-        unit: unit,
-        status: r.status,
-        icon: _sensorIcon(r.sensorType),
-        trend: r.trend,
-        timestamp: intl.DateFormat('HH:mm').format(r.timestamp),
-      );
-    }).toList();
+    final cards =
+        _readings.map((r) {
+          final (value, unit) = _formatTempForDisplay(
+            r,
+            settings.temperatureUnit,
+          );
+          return SensorCard(
+            label: r.label,
+            value: value,
+            unit: unit,
+            status: r.status,
+            icon: _sensorIcon(r.sensorType),
+            trend: r.trend,
+            timestamp: intl.DateFormat('HH:mm').format(r.timestamp),
+          );
+        }).toList();
     if (cards.isEmpty) return [];
     final rows = <Widget>[];
     for (var i = 0; i < cards.length; i += 2) {
@@ -338,10 +260,7 @@ class _DashboardPageState extends State<DashboardPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(child: a),
-            if (b != null) ...[
-              const SizedBox(width: 12),
-              Expanded(child: b),
-            ],
+            if (b != null) ...[const SizedBox(width: 12), Expanded(child: b)],
           ],
         ),
       );
@@ -354,12 +273,13 @@ class _DashboardPageState extends State<DashboardPage> {
 
   @override
   Widget build(BuildContext context) {
-    final provider = context.watch<MaintenanceProvider>();
     final settings = context.watch<SettingsProvider>();
     _updateTimerIfNeeded(settings);
-    final lastUpdate = _readings.isNotEmpty
-        ? intl.DateFormat('HH:mm:ss').format(_readings.first.timestamp)
-        : '--:--:--';
+    final updatedAt = _payload?.updatedAt;
+    final lastUpdate = _formatUpdatedAt(updatedAt);
+    final hasLive =
+        settings.useLiveSensors &&
+        settings.sensorServerBaseUrl.trim().isNotEmpty;
 
     return Directionality(
       textDirection: TextDirection.rtl,
@@ -371,16 +291,37 @@ class _DashboardPageState extends State<DashboardPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (settings.useLiveSensors &&
-                    !_liveHadSuccessfulFetch &&
-                    !_liveFetchFailed)
+                if (!hasLive)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Material(
+                      color: AppColors.warning.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(10),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Row(
+                          children: [
+                            Icon(Icons.link_off, color: AppColors.warning),
+                            const SizedBox(width: 8),
+                            const Expanded(
+                              child: Text(
+                                'يجب تحديد عنوان سيرفر الحساسات من الإعدادات. لا توجد بيانات وهمية في هذه الصفحة.',
+                                style: TextStyle(fontSize: 13),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                if (hasLive && _isConnecting)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 12),
                     child: Material(
                       color: AppColors.primary.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(10),
-                      child: Padding(
-                        padding: const EdgeInsets.all(12),
+                      child: const Padding(
+                        padding: EdgeInsets.all(12),
                         child: Row(
                           children: [
                             SizedBox(
@@ -391,8 +332,8 @@ class _DashboardPageState extends State<DashboardPage> {
                                 color: AppColors.primary,
                               ),
                             ),
-                            const SizedBox(width: 12),
-                            const Expanded(
+                            SizedBox(width: 12),
+                            Expanded(
                               child: Text(
                                 'جاري الاتصال بالسيرفر…',
                                 style: TextStyle(fontSize: 13),
@@ -403,7 +344,7 @@ class _DashboardPageState extends State<DashboardPage> {
                       ),
                     ),
                   ),
-                if (settings.useLiveSensors && _liveFetchFailed)
+                if (hasLive && _liveFetchFailed)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 12),
                     child: Material(
@@ -426,9 +367,7 @@ class _DashboardPageState extends State<DashboardPage> {
                       ),
                     ),
                   ),
-                if (settings.useLiveSensors &&
-                    _liveHadSuccessfulFetch &&
-                    !_liveFetchFailed)
+                if (hasLive && _payload != null && !_liveFetchFailed)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 12),
                     child: Material(
@@ -438,7 +377,11 @@ class _DashboardPageState extends State<DashboardPage> {
                         padding: const EdgeInsets.all(10),
                         child: Row(
                           children: [
-                            Icon(Icons.sensors, color: AppColors.success, size: 22),
+                            Icon(
+                              Icons.sensors,
+                              color: AppColors.success,
+                              size: 22,
+                            ),
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
@@ -491,85 +434,14 @@ class _DashboardPageState extends State<DashboardPage> {
                 ),
                 const SizedBox(height: 20),
 
-                // قراءة العداد والأزرار
-                Row(
-                  children: [
-                    Expanded(
-                      child: Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(12),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.05),
-                              blurRadius: 8,
-                              offset: const Offset(0, 2),
-                            ),
-                          ],
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(Icons.speed, color: AppColors.primary, size: 28),
-                            const SizedBox(width: 10),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  'قراءة العداد',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey,
-                                  ),
-                                ),
-                                Text(
-                                  '${intl.NumberFormat('#,###').format(provider.data.currentMileage)} كم',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 18,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Column(
-                      children: [
-                        IconButton.filled(
-                          onPressed: () => MileageUpdateDialog.show(context),
-                          icon: const Icon(Icons.edit),
-                          style: IconButton.styleFrom(
-                            backgroundColor: AppColors.primary,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        FilledButton.icon(
-                          onPressed: () => OilChangeDialog.show(context),
-                          icon: const Icon(Icons.build, size: 18),
-                          label: const Text('تغيير زيت'),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: AppColors.success,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 10,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 20),
-
-                // بطاقة حالة الزيت
-                const OilChangeCard(),
+                _buildTelemetrySummary(),
                 const SizedBox(height: 20),
 
                 // مستشعرات 2×2 — صفوف بدل GridView لتفادي قصّ المحتوى على الويب
-                ..._buildSensorRows(settings),
+                if (_readings.isNotEmpty) ...[
+                  ..._buildSensorRows(settings),
+                ] else
+                  _buildNoDataCard(),
                 const SizedBox(height: 20),
 
                 // ملخص الإحصائيات
@@ -577,19 +449,22 @@ class _DashboardPageState extends State<DashboardPage> {
                   children: [
                     _StatChip(
                       label: 'طبيعي',
-                      count: _readings.where((r) => r.status == 'NORMAL').length,
+                      count:
+                          _readings.where((r) => r.status == 'NORMAL').length,
                       color: AppColors.success,
                     ),
                     const SizedBox(width: 10),
                     _StatChip(
                       label: 'تحذير',
-                      count: _readings.where((r) => r.status == 'WARNING').length,
+                      count:
+                          _readings.where((r) => r.status == 'WARNING').length,
                       color: AppColors.warning,
                     ),
                     const SizedBox(width: 10),
                     _StatChip(
                       label: 'حرجة',
-                      count: _readings.where((r) => r.status == 'CRITICAL').length,
+                      count:
+                          _readings.where((r) => r.status == 'CRITICAL').length,
                       color: AppColors.critical,
                     ),
                   ],
@@ -598,6 +473,86 @@ class _DashboardPageState extends State<DashboardPage> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  String _formatUpdatedAt(String? iso) {
+    if (iso == null || iso.isEmpty) return '--:--:--';
+    try {
+      final dt = DateTime.parse(iso).toLocal();
+      return intl.DateFormat('HH:mm:ss').format(dt);
+    } catch (_) {
+      return '--:--:--';
+    }
+  }
+
+  Widget _buildTelemetrySummary() {
+    final p = _payload;
+    final engineKm = p?.engineOil ?? 0;
+    final gearKm = p?.gearOil ?? 0;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _TelemetryItem(
+              label: 'المتبقي زيت المحرك',
+              value: '${intl.NumberFormat('#,###').format(engineKm)} كم',
+              color: AppColors.success,
+              icon: Icons.oil_barrel_outlined,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: _TelemetryItem(
+              label: 'المتبقي زيت القير',
+              value: '${intl.NumberFormat('#,###').format(gearKm)} كم',
+              color: AppColors.primary,
+              icon: Icons.settings,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNoDataCard() {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: const Row(
+        children: [
+          Icon(Icons.sensors_off, color: Colors.grey),
+          SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'لا توجد قراءات حية حالياً. شغّل الحساسات وتأكد من وصول البيانات إلى السيرفر.',
+              style: TextStyle(fontSize: 13),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -636,22 +591,65 @@ class _StatChip extends StatelessWidget {
             Container(
               width: 8,
               height: 8,
-              decoration: BoxDecoration(
-                color: color,
-                shape: BoxShape.circle,
-              ),
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
             ),
             const SizedBox(width: 8),
             Text(
               '$label: $count',
-              style: const TextStyle(
-                fontWeight: FontWeight.w600,
-                fontSize: 13,
-              ),
+              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _TelemetryItem extends StatelessWidget {
+  final String label;
+  final String value;
+  final Color color;
+  final IconData icon;
+
+  const _TelemetryItem({
+    required this.label,
+    required this.value,
+    required this.color,
+    required this.icon,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(icon, color: color, size: 20),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+              ),
+              Text(
+                value,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
