@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../services/settings_api_service.dart';
 
 const _storageKey = 'app_settings';
 
@@ -31,37 +32,56 @@ class SettingsProvider extends ChangeNotifier {
     _load();
   }
 
+  Map<String, dynamic> _toMap() => {
+        'temperatureUnit': _temperatureUnit,
+        'updateInterval': _updateIntervalSeconds,
+        'notificationsEnabled': _notificationsEnabled,
+        'criticalAlertsOnly': _criticalAlertsOnly,
+        'autoReconnect': _autoReconnect,
+        'darkMode': _darkMode,
+        'dataRetentionDays': _dataRetentionDays,
+        'sensorServerBaseUrl': _sensorServerBaseUrl,
+      };
+
+  void _applyMap(Map<String, dynamic> map) {
+    _temperatureUnit = map['temperatureUnit'] as String? ?? _temperatureUnit;
+    _updateIntervalSeconds = map['updateInterval'] as int? ?? _updateIntervalSeconds;
+    _notificationsEnabled = map['notificationsEnabled'] as bool? ?? _notificationsEnabled;
+    _criticalAlertsOnly = map['criticalAlertsOnly'] as bool? ?? _criticalAlertsOnly;
+    _autoReconnect = map['autoReconnect'] as bool? ?? _autoReconnect;
+    _darkMode = map['darkMode'] as bool? ?? _darkMode;
+    _dataRetentionDays = map['dataRetentionDays'] as int? ?? _dataRetentionDays;
+    _sensorServerBaseUrl = map['sensorServerBaseUrl'] as String? ?? _sensorServerBaseUrl;
+  }
+
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_storageKey);
     if (raw != null) {
       try {
         final map = jsonDecode(raw) as Map<String, dynamic>;
-        _temperatureUnit = map['temperatureUnit'] as String? ?? 'celsius';
-        _updateIntervalSeconds = map['updateInterval'] as int? ?? 3;
-        _notificationsEnabled = map['notificationsEnabled'] as bool? ?? true;
-        _criticalAlertsOnly = map['criticalAlertsOnly'] as bool? ?? false;
-        _autoReconnect = map['autoReconnect'] as bool? ?? true;
-        _darkMode = map['darkMode'] as bool? ?? false;
-        _dataRetentionDays = map['dataRetentionDays'] as int? ?? 30;
-        _sensorServerBaseUrl = map['sensorServerBaseUrl'] as String? ?? '';
+        _applyMap(map);
       } catch (_) {}
+    }
+
+    // Sync from Firestore when server is configured.
+    if (_sensorServerBaseUrl.trim().isNotEmpty) {
+      final remote = await SettingsApiService.fetchSettings(_sensorServerBaseUrl);
+      if (remote != null) {
+        _applyMap(remote);
+        await prefs.setString(_storageKey, jsonEncode(_toMap()));
+      }
     }
     notifyListeners();
   }
 
-  Future<void> _save() async {
+  Future<void> _save({bool syncRemote = true}) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_storageKey, jsonEncode({
-      'temperatureUnit': _temperatureUnit,
-      'updateInterval': _updateIntervalSeconds,
-      'notificationsEnabled': _notificationsEnabled,
-      'criticalAlertsOnly': _criticalAlertsOnly,
-      'autoReconnect': _autoReconnect,
-      'darkMode': _darkMode,
-      'dataRetentionDays': _dataRetentionDays,
-      'sensorServerBaseUrl': _sensorServerBaseUrl,
-    }));
+    final map = _toMap();
+    await prefs.setString(_storageKey, jsonEncode(map));
+    if (syncRemote && _sensorServerBaseUrl.trim().isNotEmpty) {
+      await SettingsApiService.saveSettings(_sensorServerBaseUrl, map);
+    }
     notifyListeners();
   }
 
@@ -106,14 +126,7 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   Future<void> saveAll(Map<String, dynamic> settings) async {
-    _temperatureUnit = settings['temperatureUnit'] as String? ?? _temperatureUnit;
-    _updateIntervalSeconds = settings['updateInterval'] as int? ?? _updateIntervalSeconds;
-    _notificationsEnabled = settings['notificationsEnabled'] as bool? ?? _notificationsEnabled;
-    _criticalAlertsOnly = settings['criticalAlertsOnly'] as bool? ?? _criticalAlertsOnly;
-    _autoReconnect = settings['autoReconnect'] as bool? ?? _autoReconnect;
-    _darkMode = settings['darkMode'] as bool? ?? _darkMode;
-    _dataRetentionDays = settings['dataRetentionDays'] as int? ?? _dataRetentionDays;
-    _sensorServerBaseUrl = settings['sensorServerBaseUrl'] as String? ?? _sensorServerBaseUrl;
+    _applyMap(settings);
     await _save();
   }
 }

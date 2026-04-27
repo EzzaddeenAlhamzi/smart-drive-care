@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart' as intl;
@@ -6,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/maintenance_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/alerts_provider.dart';
+import '../services/sensor_api_service.dart';
 import '../theme/app_theme.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -19,6 +21,9 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _showSavedMessage = false;
   bool _isEditingMileage = false;
   bool _intervalInitialized = false;
+  bool _isCheckingServer = false;
+  bool? _serverReachable;
+  SensorBridgePayload? _latestPayload;
   final _mileageController = TextEditingController();
   final _intervalController = TextEditingController();
   final _sensorServerController = TextEditingController();
@@ -29,7 +34,10 @@ class _SettingsPageState extends State<SettingsPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final url = context.read<SettingsProvider>().sensorServerBaseUrl;
-      if (url.isNotEmpty) _sensorServerController.text = url;
+      if (url.isNotEmpty) {
+        _sensorServerController.text = url;
+        _checkServerConnection();
+      }
     });
   }
 
@@ -45,6 +53,26 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() => _showSavedMessage = true);
     Future.delayed(const Duration(seconds: 3), () {
       if (mounted) setState(() => _showSavedMessage = false);
+    });
+  }
+
+  Future<void> _checkServerConnection() async {
+    final baseUrl = context.read<SettingsProvider>().sensorServerBaseUrl;
+    if (baseUrl.trim().isEmpty) {
+      setState(() {
+        _serverReachable = null;
+        _latestPayload = null;
+      });
+      return;
+    }
+    setState(() => _isCheckingServer = true);
+    final health = await SensorApiService.checkHealth(baseUrl);
+    final latest = health ? await SensorApiService.fetchLatest(baseUrl) : null;
+    if (!mounted) return;
+    setState(() {
+      _isCheckingServer = false;
+      _serverReachable = health;
+      _latestPayload = latest;
     });
   }
 
@@ -461,6 +489,7 @@ class _SettingsPageState extends State<SettingsPage> {
           OutlinedButton.icon(
             onPressed: () {
               context.read<SettingsProvider>().setSensorServerBaseUrl(_sensorServerController.text);
+              _checkServerConnection();
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
                   content: Text('تم حفظ عنوان السيرفر'),
@@ -471,6 +500,46 @@ class _SettingsPageState extends State<SettingsPage> {
             icon: const Icon(Icons.save_outlined, size: 20),
             label: const Text('حفظ عنوان السيرفر'),
           ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: _isCheckingServer ? null : _checkServerConnection,
+            icon: _isCheckingServer
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.health_and_safety_outlined, size: 20),
+            label: Text(_isCheckingServer ? 'جاري الفحص...' : 'اختبار الاتصال'),
+          ),
+          if (_serverReachable != null) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: (_serverReachable! ? AppColors.success : AppColors.critical)
+                    .withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    _serverReachable! ? Icons.check_circle : Icons.error_outline,
+                    size: 18,
+                    color: _serverReachable! ? AppColors.success : AppColors.critical,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _serverReachable! ? 'السيرفر متاح ويعمل' : 'تعذر الوصول إلى السيرفر',
+                    style: TextStyle(
+                      color: _serverReachable! ? AppColors.success : AppColors.critical,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -513,12 +582,15 @@ class _SettingsPageState extends State<SettingsPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'معلومات الجهاز المتصل',
+                  'حالة مصدر البيانات',
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 8),
-                Text('الاسم: Vehicle Sensor Unit v2.5'),
-                Text('MAC: 00:1B:44:11:3A:B7'),
+                Text('وضع الاتصال: ${settings.useLiveSensors ? 'مباشر من السيرفر' : 'محلي'}'),
+                Text('عنوان السيرفر: ${settings.sensorServerBaseUrl.isEmpty ? '-' : settings.sensorServerBaseUrl}'),
+                Text('حالة السيرفر: ${_serverReachable == null ? 'غير مفحوص' : (_serverReachable! ? 'متاح' : 'غير متاح')}'),
+                if (_latestPayload?.updatedAt != null)
+                  Text('آخر تحديث فعلي: ${_latestPayload!.updatedAt}'),
               ],
             ),
           ),
@@ -697,20 +769,108 @@ class _SettingsPageState extends State<SettingsPage> {
       },
       'exportedAt': DateTime.now().toIso8601String(),
     };
-    // في التطبيق الحقيقي سيتم تنزيل الملف
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('تم إنشاء النسخة الاحتياطية: ${jsonEncode(data).length} حرف'),
-        backgroundColor: AppColors.success,
+    final backupJson = const JsonEncoder.withIndent('  ').convert(data);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('نسخة احتياطية (JSON)'),
+        content: SizedBox(
+          width: 520,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              backupJson,
+              textDirection: TextDirection.ltr,
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('إغلاق'),
+          ),
+          FilledButton.icon(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: backupJson));
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('تم نسخ النسخة الاحتياطية للحافظة'),
+                  backgroundColor: AppColors.success,
+                ),
+              );
+            },
+            icon: const Icon(Icons.copy, size: 18),
+            label: const Text('نسخ'),
+          ),
+        ],
       ),
     );
   }
 
   void _importBackup(BuildContext context) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('استعادة النسخة الاحتياطية - قيد التطوير'),
-        backgroundColor: AppColors.primary,
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('استعادة النسخة الاحتياطية'),
+        content: SizedBox(
+          width: 520,
+          child: TextField(
+            controller: controller,
+            minLines: 10,
+            maxLines: 16,
+            textDirection: TextDirection.ltr,
+            decoration: const InputDecoration(
+              hintText: 'الصق JSON هنا...',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              try {
+                final raw = controller.text.trim();
+                final map = jsonDecode(raw) as Map<String, dynamic>;
+                final settingsMap =
+                    (map['settings'] as Map?)?.cast<String, dynamic>() ?? {};
+                final maintenanceMap =
+                    (map['maintenance'] as Map?)?.cast<String, dynamic>() ?? {};
+                final settings = context.read<SettingsProvider>();
+                final maintenance = context.read<MaintenanceProvider>();
+
+                await settings.saveAll(settingsMap);
+                if (maintenanceMap.isNotEmpty) {
+                  await maintenance.restoreFromJson(maintenanceMap);
+                }
+                if (!mounted) return;
+                Navigator.pop(ctx);
+                setState(() => _intervalInitialized = false);
+                _sensorServerController.text = settings.sensorServerBaseUrl;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('تمت استعادة النسخة الاحتياطية بنجاح'),
+                    backgroundColor: AppColors.success,
+                  ),
+                );
+              } catch (_) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('صيغة النسخة الاحتياطية غير صحيحة'),
+                    backgroundColor: AppColors.critical,
+                  ),
+                );
+              }
+            },
+            style: FilledButton.styleFrom(backgroundColor: AppColors.success),
+            child: const Text('استعادة'),
+          ),
+        ],
       ),
     );
   }

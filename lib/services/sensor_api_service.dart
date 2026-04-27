@@ -62,4 +62,24 @@ class SensorApiService {
       return null;
     }
   }
+
+  static Future<bool> checkHealth(String baseUrl) async {
+    try {
+      var b = baseUrl.trim();
+      if (b.isEmpty) return false;
+      if (!b.startsWith('http://') && !b.startsWith('https://')) {
+        b = 'http://$b';
+      }
+      if (b.endsWith('/')) {
+        b = b.substring(0, b.length - 1);
+      }
+      final uri = Uri.parse('$b/api/health');
+      final res = await http.get(uri).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return false;
+      final map = jsonDecode(res.body) as Map<String, dynamic>;
+      return map['ok'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
 }

@@ -142,8 +142,8 @@ class _RootLayoutState extends State<RootLayout> {
                         onTap: () => setState(() => _currentIndex = 3),
                       ),
                       _NavItem(
-                        icon: Icons.settings,
-                        label: 'الإعدادات',
+                        icon: Icons.build,
+                        label: 'سجل الصيانة',
                         isActive: _currentIndex == 4,
                         onTap: () => setState(() => _currentIndex = 4),
                       ),

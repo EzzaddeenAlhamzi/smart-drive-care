@@ -13,6 +13,8 @@
  * - GET /api/alerts
  * - GET /api/alerts/ack?id=<alertDocId>
  * - GET /api/history?period=today|week|month&limit=...
+ * - GET /api/settings
+ * - POST /api/settings
  */
 
 const http = require('http');
@@ -63,7 +65,7 @@ function initFirestore() {
 function corsHeaders(extra = {}) {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Accept',
     ...extra,
   };
@@ -261,6 +263,64 @@ async function readHistoryFromFirestore(period = 'today', limit = 200) {
   return rows;
 }
 
+const DEFAULT_APP_SETTINGS = {
+  temperatureUnit: 'celsius',
+  updateInterval: 3,
+  notificationsEnabled: true,
+  criticalAlertsOnly: false,
+  autoReconnect: true,
+  darkMode: false,
+  dataRetentionDays: 30,
+  sensorServerBaseUrl: '',
+};
+
+async function readAppSettings() {
+  if (!db) return DEFAULT_APP_SETTINGS;
+  const ref = db.collection('app_settings').doc('global');
+  const snap = await ref.get();
+  if (!snap.exists) return DEFAULT_APP_SETTINGS;
+  const data = snap.data() || {};
+  return {
+    ...DEFAULT_APP_SETTINGS,
+    ...data,
+  };
+}
+
+async function saveAppSettings(settings) {
+  if (!db) return false;
+  const ref = db.collection('app_settings').doc('global');
+  await ref.set(
+    {
+      ...DEFAULT_APP_SETTINGS,
+      ...settings,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true },
+  );
+  return true;
+}
+
+function parseJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 1_000_000) {
+        reject(new Error('Payload too large'));
+      }
+    });
+    req.on('end', () => {
+      try {
+        const parsed = body ? JSON.parse(body) : {};
+        resolve(parsed);
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
 async function persistReading(reading, classification = null) {
   if (!db) return;
 
@@ -376,6 +436,36 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === '/api/settings' || url.pathname === '/api/settings/') {
+    if (req.method === 'GET') {
+      try {
+        const settings = await readAppSettings();
+        res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+        res.end(JSON.stringify({ ok: true, settings }));
+      } catch (e) {
+        console.error('Read settings error:', e.message);
+        res.writeHead(500, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+        res.end(JSON.stringify({ ok: false, settings: DEFAULT_APP_SETTINGS }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST') {
+      try {
+        const body = await parseJsonBody(req);
+        const settings = (body && body.settings) || {};
+        const ok = await saveAppSettings(settings);
+        res.writeHead(ok ? 200 : 500, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+        res.end(JSON.stringify({ ok }));
+      } catch (e) {
+        console.error('Save settings error:', e.message);
+        res.writeHead(400, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+        res.end(JSON.stringify({ ok: false }));
+      }
+      return;
+    }
+  }
+
   if (url.pathname === '/' || url.pathname === '') {
     res.writeHead(200, corsHeaders({ 'Content-Type': 'text/plain; charset=utf-8' }));
     res.end('Smart Drive Care sensor bridge. GET /api/latest — target for ESP: /update?...');
@@ -392,5 +482,6 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('  Flutter   → GET /api/latest');
   console.log('  Alerts    → GET /api/alerts , GET /api/alerts/ack?id=');
   console.log('  History   → GET /api/history?period=today|week|month');
+  console.log('  Settings  → GET/POST /api/settings');
   console.log('  Health    → GET /api/health');
 });

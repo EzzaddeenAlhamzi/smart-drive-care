@@ -2,12 +2,27 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart' as intl;
 import 'package:fl_chart/fl_chart.dart';
+import '../models/alert.dart';
+import '../models/historical_data.dart';
 import '../providers/settings_provider.dart';
 import '../services/export_service.dart';
+import '../services/alerts_api_service.dart';
+import '../services/history_api_service.dart';
 import '../theme/app_theme.dart';
 
-class ReportsPage extends StatelessWidget {
+class ReportsPage extends StatefulWidget {
   const ReportsPage({super.key});
+
+  @override
+  State<ReportsPage> createState() => _ReportsPageState();
+}
+
+class _ReportsPageState extends State<ReportsPage> {
+  List<HistoricalData> _rows = const [];
+  List<Alert> _alerts = const [];
+  bool _isLoading = false;
+  bool _loadFailed = false;
+  String _lastBaseUrl = '';
 
   double _convertTemp(double celsius, String tempUnit) {
     if (tempUnit == 'fahrenheit') return celsius * 9 / 5 + 32;
@@ -15,35 +30,219 @@ class ReportsPage extends StatelessWidget {
   }
 
   @override
+  void initState() {
+    super.initState();
+    _fetchData();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final baseUrl = context.watch<SettingsProvider>().sensorServerBaseUrl.trim();
+    if (baseUrl != _lastBaseUrl) {
+      _lastBaseUrl = baseUrl;
+      _fetchData();
+    }
+  }
+
+  Future<void> _fetchData() async {
+    final baseUrl = context.read<SettingsProvider>().sensorServerBaseUrl;
+    if (baseUrl.trim().isEmpty) {
+      setState(() {
+        _rows = const [];
+        _alerts = const [];
+        _isLoading = false;
+        _loadFailed = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _loadFailed = false;
+    });
+
+    try {
+      final results = await Future.wait([
+        HistoryApiService.fetchHistory(baseUrl: baseUrl, period: 'month'),
+        AlertsApiService.fetchAlerts(baseUrl),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _rows = results[0] as List<HistoricalData>;
+        _alerts = results[1] as List<Alert>;
+        _isLoading = false;
+        _loadFailed = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _loadFailed = true;
+      });
+    }
+  }
+
+  String _dayLabel(int weekday) {
+    switch (weekday) {
+      case DateTime.saturday:
+        return 'السبت';
+      case DateTime.sunday:
+        return 'الأحد';
+      case DateTime.monday:
+        return 'الإثنين';
+      case DateTime.tuesday:
+        return 'الثلاثاء';
+      case DateTime.wednesday:
+        return 'الأربعاء';
+      case DateTime.thursday:
+        return 'الخميس';
+      case DateTime.friday:
+        return 'الجمعة';
+      default:
+        return '-';
+    }
+  }
+
+  ({int total, int normal, int warnings, int critical}) _summaryFromReadings() {
+    int normal = 0;
+    int warnings = 0;
+    int critical = 0;
+    for (final r in _rows) {
+      final tempCritical = r.temp > 95;
+      final tempWarning = r.temp > 85;
+      final batteryCritical = r.battery < 11;
+      final batteryWarning = r.battery < 12;
+      final oilCritical = r.oil < 30;
+      final oilWarning = r.oil < 50;
+      final transCritical = r.trans < 30;
+      final transWarning = r.trans < 50;
+
+      final isCritical = tempCritical || batteryCritical || oilCritical || transCritical;
+      final isWarning =
+          tempWarning || batteryWarning || oilWarning || transWarning;
+
+      if (isCritical) {
+        critical++;
+      } else if (isWarning) {
+        warnings++;
+      } else {
+        normal++;
+      }
+    }
+    return (total: _rows.length, normal: normal, warnings: warnings, critical: critical);
+  }
+
+  List<Map<String, dynamic>> _weeklyAverages() {
+    final now = DateTime.now();
+    final dayBuckets = <String, List<HistoricalData>>{};
+    for (int i = 6; i >= 0; i--) {
+      final d = now.subtract(Duration(days: i));
+      final key = '${d.year}-${d.month}-${d.day}';
+      dayBuckets[key] = [];
+    }
+
+    for (final r in _rows) {
+      final dt = r.recordedAt;
+      if (dt == null) continue;
+      final key = '${dt.year}-${dt.month}-${dt.day}';
+      final bucket = dayBuckets[key];
+      if (bucket != null) bucket.add(r);
+    }
+
+    final out = <Map<String, dynamic>>[];
+    dayBuckets.forEach((key, list) {
+      final parts = key.split('-').map(int.parse).toList();
+      final dt = DateTime(parts[0], parts[1], parts[2]);
+      if (list.isEmpty) {
+        out.add({'day': _dayLabel(dt.weekday), 'oil': 0.0, 'temp': 0.0});
+      } else {
+        final oilAvg = list.map((e) => e.oil).reduce((a, b) => a + b) / list.length;
+        final tempAvg = list.map((e) => e.temp).reduce((a, b) => a + b) / list.length;
+        out.add({
+          'day': _dayLabel(dt.weekday),
+          'oil': double.parse(oilAvg.toStringAsFixed(1)),
+          'temp': double.parse(tempAvg.toStringAsFixed(1)),
+        });
+      }
+    });
+    return out;
+  }
+
+  List<Map<String, dynamic>> _alertsByType() {
+    final now = DateTime.now();
+    final monthAgo = now.subtract(const Duration(days: 30));
+    final recent = _alerts.where((a) => a.timestamp.isAfter(monthAgo)).toList();
+
+    final groups = <String, List<Alert>>{};
+    for (final a in recent) {
+      final key = a.sensorType;
+      groups.putIfAbsent(key, () => []).add(a);
+    }
+
+    String sensorLabel(String sensorType) {
+      switch (sensorType) {
+        case 'TEMP':
+          return 'حرارة عالية';
+        case 'OIL':
+          return 'انخفاض الزيت';
+        case 'BATTERY':
+          return 'مشاكل البطارية';
+        case 'TRANS':
+          return 'زيت القير';
+        default:
+          return 'تنبيهات عامة';
+      }
+    }
+
+    String trendFor(List<Alert> list) {
+      final weekAgo = now.subtract(const Duration(days: 7));
+      final twoWeeksAgo = now.subtract(const Duration(days: 14));
+      final current = list.where((a) => a.timestamp.isAfter(weekAgo)).length;
+      final prev = list
+          .where((a) => a.timestamp.isAfter(twoWeeksAgo) && a.timestamp.isBefore(weekAgo))
+          .length;
+      if (current > prev) return 'up';
+      if (current < prev) return 'down';
+      return 'stable';
+    }
+
+    final out = groups.entries
+        .map((e) => {
+              'type': sensorLabel(e.key),
+              'count': e.value.length,
+              'trend': trendFor(e.value),
+            })
+        .toList();
+    out.sort((a, b) => (b['count'] as int).compareTo(a['count'] as int));
+    return out.take(4).toList();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final settings = context.watch<SettingsProvider>();
     final tempUnit = settings.temperatureUnit;
-    // بيانات محاكاة
-    const totalReadings = 2880;
-    const normalReadings = 2160;
-    const warnings = 518;
-    const critical = 202;
-    const avgTemp = 86.5;
-    const avgOil = 73.2;
-    const avgBattery = 12.5;
-    const avgTrans = 62.8;
+    final summary = _summaryFromReadings();
+    final totalReadings = summary.total;
+    final normalReadings = summary.normal;
+    final warnings = summary.warnings;
+    final critical = summary.critical;
 
-    final weeklyAverages = [
-      {'day': 'السبت', 'oil': 78.0, 'temp': 85.0},
-      {'day': 'الأحد', 'oil': 76.0, 'temp': 87.0},
-      {'day': 'الإثنين', 'oil': 74.0, 'temp': 86.0},
-      {'day': 'الثلاثاء', 'oil': 72.0, 'temp': 88.0},
-      {'day': 'الأربعاء', 'oil': 71.0, 'temp': 85.0},
-      {'day': 'الخميس', 'oil': 73.0, 'temp': 86.0},
-      {'day': 'الجمعة', 'oil': 75.0, 'temp': 84.0},
-    ];
+    final double avgTemp = _rows.isEmpty
+        ? 0.0
+        : _rows.map((r) => r.temp).reduce((a, b) => a + b) / _rows.length;
+    final double avgOil = _rows.isEmpty
+        ? 0.0
+        : _rows.map((r) => r.oil).reduce((a, b) => a + b) / _rows.length;
+    final double avgBattery = _rows.isEmpty
+        ? 0.0
+        : _rows.map((r) => r.battery).reduce((a, b) => a + b) / _rows.length;
+    final double avgTrans = _rows.isEmpty
+        ? 0.0
+        : _rows.map((r) => r.trans).reduce((a, b) => a + b) / _rows.length;
 
-    final alertsByType = [
-      {'type': 'حرارة عالية', 'count': 85, 'trend': 'up'},
-      {'type': 'انخفاض الزيت', 'count': 56, 'trend': 'down'},
-      {'type': 'مشاكل البطارية', 'count': 42, 'trend': 'stable'},
-      {'type': 'زيت القير', 'count': 37, 'trend': 'down'},
-    ];
+    final weeklyAverages = _weeklyAverages();
+    final alertsByType = _alertsByType();
 
     final now = DateTime.now();
     final monthName = intl.DateFormat('MMMM yyyy').format(now);
@@ -126,6 +325,25 @@ class ReportsPage extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 20),
+                if (settings.sensorServerBaseUrl.trim().isEmpty)
+                  _NoticeCard(
+                    icon: Icons.link_off,
+                    color: AppColors.warning,
+                    message: 'حدد عنوان السيرفر من الإعدادات لعرض تقارير حقيقية.',
+                  )
+                else if (_isLoading)
+                  _NoticeCard(
+                    icon: Icons.sync,
+                    color: AppColors.primary,
+                    message: 'جاري تحميل بيانات التقرير...',
+                  )
+                else if (_loadFailed)
+                  _NoticeCard(
+                    icon: Icons.cloud_off,
+                    color: AppColors.critical,
+                    message: 'تعذر تحميل البيانات. تحقق من اتصال السيرفر.',
+                  ),
+                const SizedBox(height: 20),
 
                 // Banner فترة التقرير
                 Container(
@@ -200,22 +418,25 @@ class ReportsPage extends StatelessWidget {
                     _SummaryCard(
                       label: 'قراءات طبيعية',
                       value: intl.NumberFormat('#,###').format(normalReadings),
-                      subtitle:
-                          '${((normalReadings / totalReadings) * 100).toStringAsFixed(0)}%',
+                      subtitle: totalReadings == 0
+                          ? '0%'
+                          : '${((normalReadings / totalReadings) * 100).toStringAsFixed(0)}%',
                       color: AppColors.success,
                     ),
                     _SummaryCard(
                       label: 'تحذيرات',
                       value: intl.NumberFormat('#,###').format(warnings),
-                      subtitle:
-                          '${((warnings / totalReadings) * 100).toStringAsFixed(0)}%',
+                      subtitle: totalReadings == 0
+                          ? '0%'
+                          : '${((warnings / totalReadings) * 100).toStringAsFixed(0)}%',
                       color: AppColors.warning,
                     ),
                     _SummaryCard(
                       label: 'حالات حرجة',
                       value: intl.NumberFormat('#,###').format(critical),
-                      subtitle:
-                          '${((critical / totalReadings) * 100).toStringAsFixed(0)}%',
+                      subtitle: totalReadings == 0
+                          ? '0%'
+                          : '${((critical / totalReadings) * 100).toStringAsFixed(0)}%',
                       color: AppColors.critical,
                     ),
                   ],
@@ -372,6 +593,14 @@ class ReportsPage extends StatelessWidget {
                     ),
                   );
                 }),
+                if (alertsByType.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                    child: Text(
+                      'لا توجد تنبيهات خلال الفترة الحالية.',
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
               ],
             ),
           ),
@@ -381,6 +610,14 @@ class ReportsPage extends StatelessWidget {
   }
 
   Widget _buildBarChart(List<Map<String, dynamic>> weeklyAverages) {
+    final maxY = weeklyAverages.isEmpty
+        ? 100.0
+        : (weeklyAverages
+                    .expand((e) => [e['oil'] as double, e['temp'] as double])
+                    .fold<double>(0, (p, v) => v > p ? v : p) +
+                10)
+            .clamp(50, 160)
+            .toDouble();
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -410,7 +647,7 @@ class ReportsPage extends StatelessWidget {
             child: BarChart(
               BarChartData(
                 alignment: BarChartAlignment.spaceAround,
-                maxY: 100,
+                maxY: maxY,
                 barGroups: weeklyAverages.asMap().entries.map((e) {
                   final i = e.key;
                   final d = e.value;
@@ -493,6 +730,11 @@ class ReportsPage extends StatelessWidget {
   }
 
   Widget _buildPieChart() {
+    final summary = _summaryFromReadings();
+    final total = summary.total == 0 ? 1 : summary.total;
+    final normalPct = ((summary.normal / total) * 100).roundToDouble();
+    final warningPct = ((summary.warnings / total) * 100).roundToDouble();
+    final criticalPct = ((summary.critical / total) * 100).roundToDouble();
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -525,9 +767,9 @@ class ReportsPage extends StatelessWidget {
                 centerSpaceRadius: 30,
                 sections: [
                   PieChartSectionData(
-                    value: 75,
+                    value: normalPct,
                     color: AppColors.success,
-                    title: '75%',
+                    title: '${normalPct.toInt()}%',
                     radius: 45,
                     titleStyle: const TextStyle(
                       fontSize: 12,
@@ -536,9 +778,9 @@ class ReportsPage extends StatelessWidget {
                     ),
                   ),
                   PieChartSectionData(
-                    value: 18,
+                    value: warningPct,
                     color: AppColors.warning,
-                    title: '18%',
+                    title: '${warningPct.toInt()}%',
                     radius: 45,
                     titleStyle: const TextStyle(
                       fontSize: 12,
@@ -547,9 +789,9 @@ class ReportsPage extends StatelessWidget {
                     ),
                   ),
                   PieChartSectionData(
-                    value: 7,
+                    value: criticalPct,
                     color: AppColors.critical,
-                    title: '7%',
+                    title: '${criticalPct.toInt()}%',
                     radius: 45,
                     titleStyle: const TextStyle(
                       fontSize: 12,
@@ -572,6 +814,45 @@ class ReportsPage extends StatelessWidget {
               _LegendItem(color: AppColors.warning, label: 'تحذير'),
               _LegendItem(color: AppColors.critical, label: 'حرج'),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _NoticeCard extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String message;
+
+  const _NoticeCard({
+    required this.icon,
+    required this.color,
+    required this.message,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ),
         ],
       ),

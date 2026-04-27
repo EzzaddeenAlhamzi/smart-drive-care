@@ -72,6 +72,12 @@ class MaintenanceProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> restoreFromJson(Map<String, dynamic> json) async {
+    _data = MaintenanceData.fromJson(json);
+    await _save();
+    notifyListeners();
+  }
+
   void recordOilChange([String? notes]) {
     final now = DateTime.now();
     final record = OilChange(
