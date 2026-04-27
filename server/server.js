@@ -207,38 +207,20 @@ async function acknowledgeAlert(alertId) {
   return true;
 }
 
-async function persistReading(reading) {
+async function persistReading(reading, classification = null) {
   if (!db) return;
 
-  const classification = classifyReading(reading);
+  const c = classification ?? classifyReading(reading);
   const data = {
     ...reading,
-    level: classification.level,
-    flags: classification.statuses,
+    level: c.level,
+    flags: c.statuses,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   };
 
   await db.collection('sensor_readings').add(data);
   await db.collection('latest').doc('current').set(data, { merge: true });
-  await maybeCreateAlert(reading, classification);
-}
-
-async function readLatestFromFirestore() {
-  if (!db) return null;
-  const snap = await db.collection('latest').doc('current').get();
-  if (!snap.exists) return null;
-  const data = snap.data();
-  return {
-    temp: toNumber(data.temp),
-    battery: toNumber(data.battery),
-    engineOil: toNumber(data.engineOil),
-    gearOil: toNumber(data.gearOil),
-    engineOilLimit: toNumber(data.engineOilLimit, ENGINE_OIL_LIMIT),
-    gearOilLimit: toNumber(data.gearOilLimit, GEAR_OIL_LIMIT),
-    updatedAt: data.updatedAt ?? null,
-    level: data.level ?? 'NORMAL',
-    flags: Array.isArray(data.flags) ? data.flags : [],
-  };
+  await maybeCreateAlert(reading, c);
 }
 
 initFirestore();
@@ -263,31 +245,26 @@ const server = http.createServer(async (req, res) => {
       updatedAt: new Date().toISOString(),
     };
 
-    latest = reading;
+    const classification = classifyReading(reading);
+    latest = {
+      ...reading,
+      level: classification.level,
+      flags: classification.statuses,
+    };
 
-    try {
-      await persistReading(reading);
-      res.writeHead(200, corsHeaders({ 'Content-Type': 'text/plain; charset=utf-8' }));
-      res.end('ok');
-    } catch (e) {
+    // Return immediately for real-time UX, persist asynchronously.
+    res.writeHead(200, corsHeaders({ 'Content-Type': 'text/plain; charset=utf-8' }));
+    res.end('ok');
+
+    persistReading(reading, classification).catch((e) => {
       console.error('Persist error:', e.message);
-      res.writeHead(500, corsHeaders({ 'Content-Type': 'text/plain; charset=utf-8' }));
-      res.end('persist_error');
-    }
+    });
     return;
   }
 
   if (url.pathname === '/api/latest' || url.pathname === '/api/latest/') {
-    try {
-      const remote = await readLatestFromFirestore();
-      const payload = remote ?? latest;
-      res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
-      res.end(JSON.stringify(payload));
-    } catch (e) {
-      console.error('Read latest error:', e.message);
-      res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
-      res.end(JSON.stringify(latest));
-    }
+    res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+    res.end(JSON.stringify(latest));
     return;
   }
 
