@@ -1,10 +1,9 @@
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:intl/intl.dart' as intl;
 import 'package:fl_chart/fl_chart.dart';
 import '../models/historical_data.dart';
 import '../providers/settings_provider.dart';
+import '../services/history_api_service.dart';
 import '../theme/app_theme.dart';
 
 class HistoryPage extends StatefulWidget {
@@ -17,29 +16,61 @@ class HistoryPage extends StatefulWidget {
 class _HistoryPageState extends State<HistoryPage> {
   String _selectedSensor = 'all';
   String _selectedPeriod = 'today';
-  late List<HistoricalData> _historicalData;
-
-  static List<HistoricalData> _generateHistoricalData() {
-    final now = DateTime.now();
-    final rand = Random();
-    final data = <HistoricalData>[];
-    for (var i = 23; i >= 0; i--) {
-      final time = now.subtract(Duration(hours: i));
-      data.add(HistoricalData(
-        timestamp: intl.DateFormat('HH:mm').format(time),
-        oil: 70 + rand.nextDouble() * 15,
-        temp: 80 + rand.nextDouble() * 15,
-        battery: 12.2 + rand.nextDouble() * 0.8,
-        trans: 55 + rand.nextDouble() * 20,
-      ));
-    }
-    return data;
-  }
+  List<HistoricalData> _historicalData = const [];
+  bool _isLoading = false;
+  bool _loadFailed = false;
+  String _lastBaseUrl = '';
 
   @override
   void initState() {
     super.initState();
-    _historicalData = _generateHistoricalData();
+    _fetchHistory();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final baseUrl = context.watch<SettingsProvider>().sensorServerBaseUrl.trim();
+    if (baseUrl != _lastBaseUrl) {
+      _lastBaseUrl = baseUrl;
+      _fetchHistory();
+    }
+  }
+
+  Future<void> _fetchHistory() async {
+    final baseUrl = context.read<SettingsProvider>().sensorServerBaseUrl;
+    if (baseUrl.trim().isEmpty) {
+      setState(() {
+        _historicalData = const [];
+        _isLoading = false;
+        _loadFailed = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _loadFailed = false;
+    });
+
+    try {
+      final rows = await HistoryApiService.fetchHistory(
+        baseUrl: baseUrl,
+        period: _selectedPeriod,
+      );
+      if (!mounted) return;
+      setState(() {
+        _historicalData = rows;
+        _isLoading = false;
+        _loadFailed = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _loadFailed = true;
+      });
+    }
   }
 
   double _convertTemp(double celsius, String tempUnit) {
@@ -73,6 +104,22 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 
   LineChartData _buildChartData(String tempUnit) {
+    if (_historicalData.isEmpty) {
+      return LineChartData(
+        minX: 0,
+        maxX: 1,
+        minY: 0,
+        maxY: 1,
+        lineBarsData: [],
+        titlesData: const FlTitlesData(
+          topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        ),
+      );
+    }
+
     final lineBarsData = <LineChartBarData>[];
 
     if (_selectedSensor == 'all') {
@@ -291,25 +338,51 @@ class _HistoryPageState extends State<HistoryPage> {
                           'week': 'هذا الأسبوع',
                           'month': 'هذا الشهر',
                         },
-                        onChanged: (v) => setState(() => _selectedPeriod = v!),
+                        onChanged: (v) {
+                          setState(() => _selectedPeriod = v!);
+                          _fetchHistory();
+                        },
                       ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 12),
                 OutlinedButton.icon(
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('تصدير البيانات - قيد التطوير')),
-                    );
-                  },
+                  onPressed: _fetchHistory,
                   icon: const Icon(Icons.download, size: 18),
-                  label: const Text('تصدير البيانات'),
+                  label: const Text('تحديث البيانات'),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: AppColors.primary,
                   ),
                 ),
                 const SizedBox(height: 20),
+                if (settings.sensorServerBaseUrl.trim().isEmpty)
+                  _NoticeCard(
+                    icon: Icons.link_off,
+                    color: AppColors.warning,
+                    message:
+                        'حدد عنوان سيرفر الحساسات من الإعدادات لعرض السجل الحقيقي.',
+                  )
+                else if (_isLoading)
+                  _NoticeCard(
+                    icon: Icons.sync,
+                    color: AppColors.primary,
+                    message: 'جاري جلب السجل التاريخي...',
+                  )
+                else if (_loadFailed)
+                  _NoticeCard(
+                    icon: Icons.cloud_off,
+                    color: AppColors.critical,
+                    message: 'تعذر جلب السجل التاريخي. تأكد من عنوان السيرفر.',
+                  )
+                else if (_historicalData.isEmpty)
+                  _NoticeCard(
+                    icon: Icons.inbox_outlined,
+                    color: AppColors.primary,
+                    message: 'لا توجد قراءات محفوظة لهذه الفترة بعد.',
+                  ),
+                if (settings.sensorServerBaseUrl.trim().isNotEmpty)
+                  const SizedBox(height: 20),
 
                 // بطاقات الإحصائيات
                 Row(
@@ -429,6 +502,45 @@ class _HistoryPageState extends State<HistoryPage> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _NoticeCard extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String message;
+
+  const _NoticeCard({
+    required this.icon,
+    required this.color,
+    required this.message,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

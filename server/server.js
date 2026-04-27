@@ -12,6 +12,7 @@
  * - GET /api/health
  * - GET /api/alerts
  * - GET /api/alerts/ack?id=<alertDocId>
+ * - GET /api/history?period=today|week|month&limit=...
  */
 
 const http = require('http');
@@ -207,6 +208,59 @@ async function acknowledgeAlert(alertId) {
   return true;
 }
 
+function periodToDurationMs(period) {
+  switch ((period || '').toLowerCase()) {
+    case 'week':
+      return 7 * 24 * 60 * 60 * 1000;
+    case 'month':
+      return 30 * 24 * 60 * 60 * 1000;
+    case 'today':
+    default:
+      return 24 * 60 * 60 * 1000;
+  }
+}
+
+async function readHistoryFromFirestore(period = 'today', limit = 200) {
+  if (!db) return [];
+  const now = Date.now();
+  const sinceMs = now - periodToDurationMs(period);
+
+  const snap = await db
+    .collection('sensor_readings')
+    .orderBy('createdAt', 'desc')
+    .limit(limit)
+    .get();
+
+  const rows = [];
+  for (const doc of snap.docs) {
+    const d = doc.data();
+    const createdAt =
+      d.createdAt && typeof d.createdAt.toDate === 'function' ? d.createdAt.toDate() : null;
+    if (!createdAt) continue;
+    if (createdAt.getTime() < sinceMs) continue;
+
+    const oilPct = d.engineOilLimit
+      ? Math.max(0, Math.min(100, (toNumber(d.engineOil) / toNumber(d.engineOilLimit, ENGINE_OIL_LIMIT)) * 100))
+      : 0;
+    const transPct = d.gearOilLimit
+      ? Math.max(0, Math.min(100, (toNumber(d.gearOil) / toNumber(d.gearOilLimit, GEAR_OIL_LIMIT)) * 100))
+      : 0;
+
+    rows.push({
+      id: doc.id,
+      timestamp: createdAt.toISOString(),
+      oil: Number(oilPct.toFixed(2)),
+      temp: Number(toNumber(d.temp).toFixed(2)),
+      battery: Number(toNumber(d.battery).toFixed(2)),
+      trans: Number(transPct.toFixed(2)),
+    });
+  }
+
+  // ascending for charts
+  rows.sort((a, b) => String(a.timestamp).compareTo(String(b.timestamp)));
+  return rows;
+}
+
 async function persistReading(reading, classification = null) {
   if (!db) return;
 
@@ -307,6 +361,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === '/api/history' || url.pathname === '/api/history/') {
+    try {
+      const period = url.searchParams.get('period') || 'today';
+      const limit = Math.max(10, Math.min(1000, Math.round(toNumber(url.searchParams.get('limit'), 240))));
+      const rows = await readHistoryFromFirestore(period, limit);
+      res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+      res.end(JSON.stringify({ period, count: rows.length, rows }));
+    } catch (e) {
+      console.error('Read history error:', e.message);
+      res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+      res.end(JSON.stringify({ period: 'today', count: 0, rows: [] }));
+    }
+    return;
+  }
+
   if (url.pathname === '/' || url.pathname === '') {
     res.writeHead(200, corsHeaders({ 'Content-Type': 'text/plain; charset=utf-8' }));
     res.end('Smart Drive Care sensor bridge. GET /api/latest — target for ESP: /update?...');
@@ -322,5 +391,6 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('  ESP/Wokwi → GET /update?temp=&battery=&engineOil=&gearOil=');
   console.log('  Flutter   → GET /api/latest');
   console.log('  Alerts    → GET /api/alerts , GET /api/alerts/ack?id=');
+  console.log('  History   → GET /api/history?period=today|week|month');
   console.log('  Health    → GET /api/health');
 });
