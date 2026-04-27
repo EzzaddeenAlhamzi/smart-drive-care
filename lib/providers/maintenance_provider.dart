@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/maintenance_data.dart';
 import '../models/oil_change.dart';
+import '../services/maintenance_api_service.dart';
 
 const _storageKey = 'maintenance_data';
 
@@ -19,9 +20,19 @@ class MaintenanceProvider extends ChangeNotifier {
   );
 
   MaintenanceData get data => _data;
+  String _baseUrl = '';
 
   MaintenanceProvider() {
     _load();
+  }
+
+  void configureServer(String baseUrl) {
+    final normalized = baseUrl.trim();
+    if (normalized == _baseUrl) return;
+    _baseUrl = normalized;
+    if (_baseUrl.isNotEmpty) {
+      _loadFromServer();
+    }
   }
 
   Future<void> reload() => _load();
@@ -54,9 +65,20 @@ class MaintenanceProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> _loadFromServer() async {
+    final remote = await MaintenanceApiService.fetchData(_baseUrl);
+    if (remote == null) return;
+    _data = remote;
+    await _save();
+    notifyListeners();
+  }
+
   Future<void> _save() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_storageKey, jsonEncode(_data.toJson()));
+    if (_baseUrl.isNotEmpty) {
+      await MaintenanceApiService.saveData(_baseUrl, _data);
+    }
   }
 
   void updateCurrentMileage(int mileage) {

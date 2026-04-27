@@ -26,6 +26,16 @@ class MaintenanceLogPage extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: FilledButton.icon(
+                        onPressed: () => _showRecordDialog(context, maintenance),
+                        icon: const Icon(Icons.add, size: 18),
+                        label: const Text('تسجيل تغيير زيت'),
+                        style: FilledButton.styleFrom(backgroundColor: AppColors.success),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
                     // زر التصدير
                     Align(
                       alignment: Alignment.centerLeft,
@@ -65,6 +75,44 @@ class MaintenanceLogPage extends StatelessWidget {
             ),
           );
         },
+      ),
+    );
+  }
+
+  void _showRecordDialog(BuildContext context, MaintenanceProvider maintenance) {
+    final noteController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('تسجيل تغيير زيت جديد'),
+        content: TextField(
+          controller: noteController,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            hintText: 'ملاحظات (اختياري)',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            onPressed: () {
+              maintenance.recordOilChange(noteController.text.trim().isEmpty ? null : noteController.text.trim());
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('تم تسجيل تغيير الزيت وحفظه في القاعدة'),
+                  backgroundColor: AppColors.success,
+                ),
+              );
+            },
+            style: FilledButton.styleFrom(backgroundColor: AppColors.success),
+            child: const Text('حفظ'),
+          ),
+        ],
       ),
     );
   }

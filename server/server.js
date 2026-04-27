@@ -15,6 +15,8 @@
  * - GET /api/history?period=today|week|month&limit=...
  * - GET /api/settings
  * - POST /api/settings
+ * - GET /api/maintenance
+ * - POST /api/maintenance
  */
 
 const http = require('http');
@@ -274,6 +276,13 @@ const DEFAULT_APP_SETTINGS = {
   sensorServerBaseUrl: '',
 };
 
+const DEFAULT_MAINTENANCE = {
+  currentMileage: 50000,
+  oilChangeInterval: 5000,
+  lastOilChange: null,
+  oilChangeHistory: [],
+};
+
 async function readAppSettings() {
   if (!db) return DEFAULT_APP_SETTINGS;
   const ref = db.collection('app_settings').doc('global');
@@ -293,6 +302,32 @@ async function saveAppSettings(settings) {
     {
       ...DEFAULT_APP_SETTINGS,
       ...settings,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true },
+  );
+  return true;
+}
+
+async function readMaintenanceData() {
+  if (!db) return DEFAULT_MAINTENANCE;
+  const ref = db.collection('app_maintenance').doc('global');
+  const snap = await ref.get();
+  if (!snap.exists) return DEFAULT_MAINTENANCE;
+  const data = snap.data() || {};
+  return {
+    ...DEFAULT_MAINTENANCE,
+    ...data,
+  };
+}
+
+async function saveMaintenanceData(data) {
+  if (!db) return false;
+  const ref = db.collection('app_maintenance').doc('global');
+  await ref.set(
+    {
+      ...DEFAULT_MAINTENANCE,
+      ...data,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     },
     { merge: true },
@@ -466,6 +501,36 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (url.pathname === '/api/maintenance' || url.pathname === '/api/maintenance/') {
+    if (req.method === 'GET') {
+      try {
+        const data = await readMaintenanceData();
+        res.writeHead(200, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+        res.end(JSON.stringify({ ok: true, data }));
+      } catch (e) {
+        console.error('Read maintenance error:', e.message);
+        res.writeHead(500, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+        res.end(JSON.stringify({ ok: false, data: DEFAULT_MAINTENANCE }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST') {
+      try {
+        const body = await parseJsonBody(req);
+        const data = (body && body.data) || {};
+        const ok = await saveMaintenanceData(data);
+        res.writeHead(ok ? 200 : 500, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+        res.end(JSON.stringify({ ok }));
+      } catch (e) {
+        console.error('Save maintenance error:', e.message);
+        res.writeHead(400, corsHeaders({ 'Content-Type': 'application/json; charset=utf-8' }));
+        res.end(JSON.stringify({ ok: false }));
+      }
+      return;
+    }
+  }
+
   if (url.pathname === '/' || url.pathname === '') {
     res.writeHead(200, corsHeaders({ 'Content-Type': 'text/plain; charset=utf-8' }));
     res.end('Smart Drive Care sensor bridge. GET /api/latest — target for ESP: /update?...');
@@ -483,5 +548,6 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('  Alerts    → GET /api/alerts , GET /api/alerts/ack?id=');
   console.log('  History   → GET /api/history?period=today|week|month');
   console.log('  Settings  → GET/POST /api/settings');
+  console.log('  Maint.    → GET/POST /api/maintenance');
   console.log('  Health    → GET /api/health');
 });
