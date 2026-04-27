@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
+import '../services/sensor_api_service.dart';
 import '../theme/app_theme.dart';
 
 class DeviceConnectionPage extends StatefulWidget {
@@ -11,38 +13,92 @@ class DeviceConnectionPage extends StatefulWidget {
 }
 
 class _DeviceConnectionPageState extends State<DeviceConnectionPage> {
-  bool _isConnected = false;
-  bool _isSearching = false;
-  final List<Map<String, String>> _discoveredDevices = [];
-  static const _mockDevices = [
-    {'name': 'Vehicle Sensor Unit v2.5', 'mac': '00:1B:44:11:3A:B7'},
-    {'name': 'Car Monitor Pro', 'mac': 'AA:BB:CC:DD:EE:F1'},
-    {'name': 'Smart OBD-II', 'mac': '11:22:33:44:55:66'},
-  ];
+  bool _isChecking = false;
+  bool _serverReachable = false;
+  SensorBridgePayload? _latest;
+  Timer? _pollTimer;
+  String _lastBaseUrl = '';
 
-  Future<void> _startSearch() async {
-    setState(() {
-      _isSearching = true;
-      _discoveredDevices.clear();
-    });
-    await Future.delayed(const Duration(seconds: 2));
-    if (mounted) {
-      setState(() {
-        _isSearching = false;
-        _discoveredDevices.addAll(_mockDevices);
-      });
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _applyPollingFromSettings());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final baseUrl = context.watch<SettingsProvider>().sensorServerBaseUrl.trim();
+    if (baseUrl != _lastBaseUrl) {
+      _lastBaseUrl = baseUrl;
+      _applyPollingFromSettings();
     }
   }
 
-  void _connectToDevice(Map<String, String> device) {
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _applyPollingFromSettings() async {
+    _pollTimer?.cancel();
+    final settings = context.read<SettingsProvider>();
+    final baseUrl = settings.sensorServerBaseUrl.trim();
+    if (baseUrl.isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _serverReachable = false;
+        _latest = null;
+      });
+      return;
+    }
+
+    await _refreshConnection();
+    final interval = Duration(seconds: settings.updateIntervalSeconds.clamp(1, 30));
+    _pollTimer = Timer.periodic(interval, (_) => _refreshConnection());
+  }
+
+  Future<void> _refreshConnection() async {
+    final baseUrl = context.read<SettingsProvider>().sensorServerBaseUrl.trim();
+    if (baseUrl.isEmpty) return;
+    if (mounted) setState(() => _isChecking = true);
+    final ok = await SensorApiService.checkHealth(baseUrl);
+    final latest = ok ? await SensorApiService.fetchLatest(baseUrl) : null;
+    if (!mounted) return;
     setState(() {
-      _isConnected = true;
-      _discoveredDevices.clear();
+      _isChecking = false;
+      _serverReachable = ok;
+      _latest = latest;
     });
   }
 
-  void _disconnect() {
-    setState(() => _isConnected = false);
+  bool get _isConnected {
+    if (!_serverReachable || _latest?.updatedAt == null) return false;
+    try {
+      final ts = DateTime.parse(_latest!.updatedAt!).toLocal();
+      return DateTime.now().difference(ts).inSeconds <= 30;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String _statusText(SettingsProvider settings) {
+    if (settings.sensorServerBaseUrl.trim().isEmpty) return 'لم يتم ضبط عنوان السيرفر';
+    if (_isChecking) return 'جاري فحص الاتصال...';
+    if (_isConnected) return 'متصل بالحساسات والبيانات مباشرة';
+    if (_serverReachable) return 'السيرفر متاح لكن لا توجد بيانات حديثة';
+    return 'غير متصل بالسيرفر';
+  }
+
+  String _updatedAtText() {
+    final ts = _latest?.updatedAt;
+    if (ts == null || ts.isEmpty) return '-';
+    try {
+      return DateTime.parse(ts).toLocal().toString();
+    } catch (_) {
+      return ts;
+    }
   }
 
   @override
@@ -63,17 +119,9 @@ class _DeviceConnectionPageState extends State<DeviceConnectionPage> {
                 _buildConnectionStatusCard(settings),
                 const SizedBox(height: 24),
 
-                if (_isConnected) ...[
-                  _buildConnectedDeviceCard(),
-                  const SizedBox(height: 24),
-                  _buildDisconnectButton(),
-                ] else ...[
-                  _buildSearchSection(),
-                  if (_discoveredDevices.isNotEmpty) ...[
-                    const SizedBox(height: 16),
-                    _buildDiscoveredDevicesList(),
-                  ],
-                ],
+                _buildConnectedDeviceCard(),
+                const SizedBox(height: 16),
+                _buildConnectionActions(context),
 
                 const SizedBox(height: 24),
 
@@ -131,9 +179,7 @@ class _DeviceConnectionPageState extends State<DeviceConnectionPage> {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  _isConnected
-                      ? 'البيانات تُستقبل تلقائياً'
-                      : 'ابحث عن جهاز المستشعر للاتصال',
+                  _statusText(settings),
                   style: TextStyle(
                     fontSize: 13,
                     color: Colors.grey.shade700,
@@ -184,143 +230,58 @@ class _DeviceConnectionPageState extends State<DeviceConnectionPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            'الجهاز المتصل',
+            'بيانات الربط الفعلية',
             style: TextStyle(
               fontWeight: FontWeight.bold,
               fontSize: 16,
             ),
           ),
           const SizedBox(height: 16),
-          _InfoRow(icon: Icons.device_hub, label: 'الاسم', value: 'Vehicle Sensor Unit v2.5'),
+          _InfoRow(icon: Icons.lan, label: 'حالة السيرفر', value: _serverReachable ? 'متاح' : 'غير متاح'),
           const SizedBox(height: 12),
-          _InfoRow(icon: Icons.fingerprint, label: 'عنوان MAC', value: '00:1B:44:11:3A:B7'),
+          _InfoRow(icon: Icons.thermostat, label: 'حرارة المحرك', value: '${_latest?.temp.toStringAsFixed(1) ?? '-'}°C'),
           const SizedBox(height: 12),
-          _InfoRow(icon: Icons.signal_cellular_4_bar, label: 'قوة الإشارة', value: 'ممتاز'),
+          _InfoRow(icon: Icons.battery_charging_full, label: 'البطارية', value: '${_latest?.battery.toStringAsFixed(2) ?? '-'}V'),
+          const SizedBox(height: 12),
+          _InfoRow(icon: Icons.oil_barrel, label: 'زيت المحرك', value: '${_latest?.engineOil ?? '-'} كم'),
+          const SizedBox(height: 12),
+          _InfoRow(icon: Icons.settings_input_component, label: 'زيت القير', value: '${_latest?.gearOil ?? '-'} كم'),
+          const SizedBox(height: 12),
+          _InfoRow(icon: Icons.update, label: 'آخر تحديث', value: _updatedAtText()),
         ],
       ),
     );
   }
 
-  Widget _buildDisconnectButton() {
-    return OutlinedButton.icon(
-      onPressed: _disconnect,
-      icon: const Icon(Icons.link_off, size: 20),
-      label: const Text('قطع الاتصال'),
-      style: OutlinedButton.styleFrom(
-        foregroundColor: AppColors.critical,
-        side: const BorderSide(color: AppColors.critical),
-        padding: const EdgeInsets.symmetric(vertical: 14),
-      ),
-    );
-  }
-
-  Widget _buildSearchSection() {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.05),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text(
-            'البحث عن الأجهزة',
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              fontSize: 16,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'تأكد من تشغيل جهاز المستشعر وتفعيل Bluetooth أو WiFi',
-            style: TextStyle(
-              fontSize: 13,
-              color: Colors.grey.shade600,
-            ),
-          ),
-          const SizedBox(height: 16),
-          FilledButton.icon(
-            onPressed: _isSearching ? null : _startSearch,
-            icon: _isSearching
-                ? SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.white,
-                    ),
+  Widget _buildConnectionActions(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: FilledButton.icon(
+            onPressed: _isChecking ? null : _refreshConnection,
+            icon: _isChecking
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                   )
-                : const Icon(Icons.search, size: 22),
-            label: Text(_isSearching ? 'جاري البحث...' : 'بحث عن أجهزة'),
-            style: FilledButton.styleFrom(
-              backgroundColor: AppColors.primary,
-              padding: const EdgeInsets.symmetric(vertical: 14),
-            ),
+                : const Icon(Icons.sync, size: 18),
+            label: Text(_isChecking ? 'جاري التحديث...' : 'تحديث الآن'),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDiscoveredDevicesList() {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.05),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: OutlinedButton.icon(
+            onPressed: () {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('يمكنك تغيير عنوان السيرفر من صفحة الإعدادات')),
+              );
+            },
+            icon: const Icon(Icons.settings, size: 18),
+            label: const Text('إعدادات الربط'),
           ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text(
-              'الأجهزة المكتشفة (${_discoveredDevices.length})',
-              style: const TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: 16,
-              ),
-            ),
-          ),
-          ..._discoveredDevices.map((device) => ListTile(
-                leading: Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: AppColors.primary.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Icon(Icons.memory, color: AppColors.primary, size: 24),
-                ),
-                title: Text(device['name']!),
-                subtitle: Text(
-                  device['mac']!,
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                ),
-                trailing: FilledButton(
-                  onPressed: () => _connectToDevice(device),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.success,
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                  ),
-                  child: const Text('اتصال'),
-                ),
-              )),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
@@ -350,9 +311,9 @@ class _DeviceConnectionPageState extends State<DeviceConnectionPage> {
           ),
           const SizedBox(height: 12),
           Text(
-            '• تأكد من تفعيل Bluetooth أو WiFi على هاتفك\n'
-            '• ضع جهاز المستشعر بالقرب من الهاتف\n'
-            '• إعداد "إعادة الاتصال التلقائي" من الإعدادات يحافظ على الاتصال',
+            '• هذه الصفحة تعرض حالة الربط الحقيقية مع سيرفر الحساسات.\n'
+            '• إذا كان السيرفر متاحًا ولا توجد بيانات حديثة، تأكد أن Wokwi/ESP32 يرسل إلى /update.\n'
+            '• يتم التحديث تلقائيا حسب فترة التحديث في الإعدادات.',
             style: TextStyle(
               fontSize: 13,
               height: 1.6,
